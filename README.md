@@ -1,0 +1,45 @@
+# Capit
+
+一个菜单栏常驻的 macOS 截图标注工具（AppKit 纯程序化，无第三方依赖）。截图后自动加连续圆角 + 原生风格阴影，弹出右下角预览缩略图，点击即可进入标注编辑器；标注结果保存到桌面。
+
+## 功能特性
+
+- **三种截图模式**（菜单栏或全局快捷键）
+  - 全屏截图：`⇧⌘3`（也支持 `⇧⌘9`）
+  - 区域 / 窗口截图：`⇧⌘4`（也支持 `⇧⌘0`）
+- **交互式框选**：拖拽框选区域；**空格**在「区域 ↔ 窗口」间切换；**ESC** 取消。区域拖拽中按住空格可整体移动选区；窗口模式按真实 Z 序选窗（CGWindowList），悬停高亮，点按或回车截取当前窗口。
+- **后处理**：连续圆角 + 原生风格投影，截图时播放系统快门声。
+- **右下角预览**：新截图**替换**旧预览（旧图立即落盘），只保留一张；点击进编辑器，超时自动落到桌面。
+- **标注编辑器**：矩形 / 椭圆 / 箭头 / 直线 / 荧光笔 / 文字 / 序号 / 马赛克 工具；马赛克为纯色填充（默认黑）；支持颜色、线宽、实/虚线、字号；选中即就地修改（颜色/宽度/字号/实虚线/马赛克纯色），荧光笔固定 50% 透明度；`Cmd+S` 保存，`Cmd+Z`/`⇧Cmd+Z` 撤销重做，`Delete` 删除选中；数字自动排序。
+- **自动退出**：连续 10 分钟无截图/标注操作自动退出（可用环境变量 `CAPIT_IDLE_SECONDS` 覆盖秒数，便于测试）。
+
+## 运行环境
+
+- macOS 13.0+
+- Apple Silicon（arm64）
+- 需要**屏幕录制**权限
+
+## 构建与打包
+
+```bash
+swift build -c release          # 仅编译
+./make_app.sh release           # 打 .app（ad-hoc 签名，写入 build/Capit.app）
+open build/Capit.app
+```
+
+## 授权提示
+
+系统设置 → 隐私与安全性 → 屏幕录制：添加并勾选 Capit，授权后**完全退出并重开**生效。ad-hoc 签名应用每次重编译/重签会导致签名变化、授权被重置，需要重新授权。
+
+## 目录结构
+
+```
+Package.swift
+make_app.sh
+resources/AppIcon.icns   AppIcon.png
+Sources/Capit/
+  main.swift  AppDelegate.swift  GlobalHotKey.swift
+  CaptureController.swift  CaptureKit.swift  InteractiveCapture.swift
+  ImageProcessor.swift  PreviewWindowController.swift  CapturePipeline.swift
+  AnnotationEditor.swift  Squircle.swift
+```
