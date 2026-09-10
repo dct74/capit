@@ -166,7 +166,8 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         canvas = AnnotationCanvasView(image: image, docSize: docSize)
         toolbar = ToolbarView()
 
-        let screenSize = NSScreen.main?.frame.size ?? NSSize(width: 1440, height: 900)
+        let screenUnderMouse = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) }
+        let screenSize = (screenUnderMouse ?? NSScreen.main)?.frame.size ?? NSSize(width: 1440, height: 900)
         let contentRect = NSRect(x: 0, y: 0,
                                  width: max(400, screenSize.width * 2 / 3),
                                  height: max(300, screenSize.height * 2 / 3))
@@ -192,6 +193,8 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         }
         NSApp.setActivationPolicy(.accessory)
         AnnotationHolder.shared.active = nil
+        // Resume the idle auto-quit countdown now that no editor is open.
+        IdleAutoQuit.shared.start()
     }
 
     /// Called just before the app quits: queues the capture so a quit during editing
@@ -206,7 +209,9 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
 
     func present() {
         AnnotationHolder.shared.active = self
-        IdleAutoQuit.shared.reset()
+        // Pause the idle auto-quit while the editor is open so a long annotation session is
+        // never terminated mid-edit (which would land only the raw image).
+        IdleAutoQuit.shared.stop()
         let content = NSView()
         content.addSubview(toolbar)
 
@@ -272,7 +277,8 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
                 if !editingText { self.canvas.requestDelete(); return nil }
                 return event
             case 123, 124, 125, 126:      // ← → ↓ ↑ move the selected annotation
-                guard !editingText, self.canvas.hasSelection else { return event }
+                guard !editingText, NSApp.keyWindow === self.window,
+                      self.canvas.hasSelection else { return event }
                 let step: CGFloat = shift ? 10 : 1
                 let dx: CGFloat = (event.keyCode == 123) ? -step : (event.keyCode == 124 ? step : 0)
                 let dy: CGFloat = (event.keyCode == 125) ? step : (event.keyCode == 126 ? -step : 0)
@@ -339,7 +345,8 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         }
         isSaving = true
         let snapshot = out
-        Task.detached(priority: .userInitiated) {
+        // Route the encode+write through CaptureWriter so quitting waits for it too.
+        CaptureWriter.schedule {
             let outcome: SaveOutcome
             if let data = NSBitmapImageRep(cgImage: snapshot)
                 .representation(using: .png, properties: [:]) {
@@ -352,9 +359,7 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
             } else {
                 outcome = .failure("无法编码 PNG 图像。")
             }
-            DispatchQueue.main.async { [self] in
-                self.finishSave(outcome)
-            }
+            DispatchQueue.main.async { self.finishSave(outcome) }
         }
     }
 
@@ -366,9 +371,8 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
             window.close()
         case .failure(let message):
             presentSaveFailure(message: message)
-            // If the window was closed while the save was in flight and it failed, don't let
-            // the capture vanish — land the original image best-effort.
-            if !didSave, !window.isVisible {
+            // Never lose the capture: if nothing was written, land the original image.
+            if !didSave {
                 let url = fileURL ?? CapturePipeline.desktopURL()
                 let img = image
                 CaptureWriter.schedule { try? CapturePipeline.write(image: img, to: url) }
@@ -531,6 +535,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             if text.isEmpty {
                 pushState()
                 shapes.remove(at: i)
+                selectedIndex = nil   // the removed index may now point at the wrong shape
             } else {
                 pushState()
                 shapes[i].text = text
@@ -583,6 +588,9 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
     var strokeColor: NSColor = .red
     var strokeWidth: CGFloat = 3
+    /// Per-tool remembered stroke widths (so a width set for one tool survives deselect /
+    /// tool switching, and selecting a shape never overwrites the tool default).
+    private var widthByKind: [AnnotationShape.Kind: CGFloat] = [:]
     private var colorEditHistoryPushed = false
 
     private var colorByKind: [AnnotationShape.Kind: NSColor] = [
@@ -600,10 +608,15 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         hasActiveTool = true
         currentKind = kind
         strokeColor = colorFor(kind)
-        strokeWidth = defaultWidth(for: kind)
+        strokeWidth = widthFor(kind)
         notifyWidthDisplay()
         onActiveTool?(kind)
         refreshCursorRects()
+    }
+
+    /// Remembered stroke width for a tool (defaults to 3, or 16 for the highlighter).
+    private func widthFor(_ kind: AnnotationShape.Kind) -> CGFloat {
+        widthByKind[kind] ?? defaultWidth(for: kind)
     }
 
     private func defaultWidth(for kind: AnnotationShape.Kind) -> CGFloat {
@@ -643,21 +656,14 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
            strokeWidthKinds.contains(shapes[i].kind) {
             w = shapes[i].strokeWidth
         } else {
-            w = defaultWidth(for: currentKind)
+            w = widthFor(currentKind)
         }
         onCurrentWidthChanged?(w)
     }
 
     private func selectionChanged() {
         colorEditHistoryPushed = false
-        if let i = selectedIndex, i < shapes.count,
-           strokeWidthKinds.contains(shapes[i].kind) {
-            strokeWidth = shapes[i].strokeWidth
-        } else {
-            strokeWidth = defaultWidth(for: currentKind)
-        }
-        // Reflect the current selection (a shape's own style) or, once deselected, the tool's
-        // remembered defaults — viewing only, never adopted into the defaults.
+        // Selecting only *shows* a shape's width — it never overwrites the tool default.
         onActiveTool?(currentKind)
         notifyWidthDisplay()
         refreshCursorRects()
@@ -685,6 +691,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
     func setCurrentWidth(_ width: CGFloat) {
         strokeWidth = width
+        widthByKind[currentKind] = width   // remember per tool
         if let i = selectedIndex, i < shapes.count,
            strokeWidthKinds.contains(shapes[i].kind) {
             pushState()

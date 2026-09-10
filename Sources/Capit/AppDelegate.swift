@@ -83,7 +83,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let rounded { saveSample(rounded, path: "/tmp/capit_sample_round.png") }
         let shadowed = ImageProcessor.windowWithShadow(content: source)
         if let shadowed { saveSample(shadowed, path: "/tmp/capit_sample_window.png") }
-        selftestLog("sample rendered to /tmp/capit_sample_{round,window}.png")
+
+        // Shape-only squircle map (fill the path opaque on transparent) to debug geometry.
+        if let sctx = CGContext(data: nil, width: w, height: h,
+                                bitsPerComponent: 8, bytesPerRow: 0, space: cs,
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) {
+            let rect = CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h))
+            let sp = SquirclePath.cgPath(in: rect, radius: 80, exponent: 4)
+            sctx.setFillColor(NSColor.white.cgColor)
+            sctx.addPath(sp)
+            sctx.fillPath()
+            if let s = sctx.makeImage() { saveSample(s, path: "/tmp/capit_sample_shape.png") }
+        }
+
+        // Orientation probe: fill a rect near (0,0) of a rep and save, to verify how
+        // NSGraphicsContext(bitmapImageRep:) maps to PNG coordinates.
+        let pw = 100, ph = 60
+        if let pre = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pw, pixelsHigh: ph,
+                                      bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                      isPlanar: false, colorSpaceName: .deviceRGB,
+                                      bytesPerRow: 0, bitsPerPixel: 0),
+           let pgc = NSGraphicsContext(bitmapImageRep: pre) {
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = pgc
+            NSColor.red.setFill()
+            NSBezierPath(rect: NSRect(x: 0, y: 0, width: 40, height: 30)).fill()
+            pgc.flushGraphics()
+            NSGraphicsContext.restoreGraphicsState()
+            if let im = pre.cgImage { saveSample(im, path: "/tmp/orient_probe.png") }
+        }
+        selftestLog("sample rendered to /tmp/capit_sample_{round,window,shape}.png")
     }
 
     private func saveSample(_ image: CGImage, path: String) {

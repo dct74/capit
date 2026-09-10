@@ -84,11 +84,16 @@ enum CaptureWriter {
     }
 
     /// Awaits every write that is in flight (and any started meanwhile) — used before quitting.
-    static func waitForPending() async {
+    /// Bounded by `timeout` so a stuck write can't hang the quit indefinitely.
+    static func waitForPending(timeout: TimeInterval = 8) async {
+        let deadline = Date().addingTimeInterval(timeout)
         while true {
             let list = snapshot()
             if list.isEmpty { return }
-            for e in list { await e.task.value }
+            for e in list {
+                if Date() >= deadline { return }
+                await e.task.value
+            }
             for e in list { remove(e.id) }
         }
     }
