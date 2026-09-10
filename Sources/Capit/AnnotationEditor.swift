@@ -166,7 +166,10 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         canvas = AnnotationCanvasView(image: image, docSize: docSize)
         toolbar = ToolbarView()
 
-        let contentRect = NSRect(x: 0, y: 0, width: 900, height: 640)
+        let screenSize = NSScreen.main?.frame.size ?? NSSize(width: 1440, height: 900)
+        let contentRect = NSRect(x: 0, y: 0,
+                                 width: max(400, screenSize.width * 2 / 3),
+                                 height: max(300, screenSize.height * 2 / 3))
         window = NSWindow(contentRect: contentRect,
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
@@ -268,6 +271,13 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
             case 51, 117:
                 if !editingText { self.canvas.requestDelete(); return nil }
                 return event
+            case 123, 124, 125, 126:      // ← → ↓ ↑ move the selected annotation
+                guard !editingText, self.canvas.hasSelection else { return event }
+                let step: CGFloat = shift ? 10 : 1
+                let dx: CGFloat = (event.keyCode == 123) ? -step : (event.keyCode == 124 ? step : 0)
+                let dy: CGFloat = (event.keyCode == 125) ? step : (event.keyCode == 126 ? -step : 0)
+                self.canvas.nudgeSelected(dx: dx, dy: dy)
+                return nil
             default:
                 return event
             }
@@ -443,6 +453,20 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     func requestDelete() { if selectedIndex != nil { deleteSelected() } }
     func requestUndo() { undo() }
     func requestRedo() { redo() }
+
+    var hasSelection: Bool { selectedIndex != nil }
+
+    /// Moves the selected annotation by (dx, dy) — used by the arrow keys. One undo step
+    /// per press.
+    func nudgeSelected(dx: CGFloat, dy: CGFloat) {
+        guard let i = selectedIndex, i < shapes.count else { return }
+        pushState()
+        shapes[i].start.x += dx
+        shapes[i].start.y += dy
+        shapes[i].end.x += dx
+        shapes[i].end.y += dy
+        needsDisplay = true
+    }
 
     // MARK: Inline text editing
 
