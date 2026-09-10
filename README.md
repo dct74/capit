@@ -22,10 +22,23 @@
 ## 构建与打包
 
 ```bash
-swift build -c release          # 仅编译
-./make_app.sh release           # 打 .app（ad-hoc 签名，写入 build/Capit.app）
+# 仅编译可执行文件
+swift build -c release
+
+# 打 .app（ad-hoc 签名，写入 build/Capit.app）
+./make_app.sh release
+
+# 启动
 open build/Capit.app
 ```
+
+产物 `build/Capit.app` 完全自包含（单可执行文件 + 图标 + Info.plist），无外部框架，可直接拷贝到别的 Mac。
+
+## 仓库 / 许可
+
+- 源码仓库：`git@github.com:dct74/capit.git`（SSH）
+- 以源码构建时，`.build/` 与 `build/` 为本地产物，已在 `.gitignore` 中排除。
+- 许可：MIT（见 `LICENSE`）。
 
 ## 授权提示
 
