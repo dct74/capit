@@ -588,9 +588,6 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
     var strokeColor: NSColor = .red
     var strokeWidth: CGFloat = 3
-    /// Per-tool remembered stroke widths (so a width set for one tool survives deselect /
-    /// tool switching, and selecting a shape never overwrites the tool default).
-    private var widthByKind: [AnnotationShape.Kind: CGFloat] = [:]
     private var colorEditHistoryPushed = false
 
     private var colorByKind: [AnnotationShape.Kind: NSColor] = [
@@ -608,15 +605,10 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         hasActiveTool = true
         currentKind = kind
         strokeColor = colorFor(kind)
-        strokeWidth = widthFor(kind)
+        strokeWidth = defaultWidth(for: kind)
         notifyWidthDisplay()
         onActiveTool?(kind)
         refreshCursorRects()
-    }
-
-    /// Remembered stroke width for a tool (defaults to 3, or 16 for the highlighter).
-    private func widthFor(_ kind: AnnotationShape.Kind) -> CGFloat {
-        widthByKind[kind] ?? defaultWidth(for: kind)
     }
 
     private func defaultWidth(for kind: AnnotationShape.Kind) -> CGFloat {
@@ -656,14 +648,18 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
            strokeWidthKinds.contains(shapes[i].kind) {
             w = shapes[i].strokeWidth
         } else {
-            w = widthFor(currentKind)
+            w = defaultWidth(for: currentKind)
         }
         onCurrentWidthChanged?(w)
     }
 
     private func selectionChanged() {
         colorEditHistoryPushed = false
-        // Selecting only *shows* a shape's width — it never overwrites the tool default.
+        // Selecting only *shows* a shape's width (view only) — it never changes the tool
+        // default. Deselecting resets the active width back to the tool default (3 / 16).
+        if selectedIndex == nil {
+            strokeWidth = defaultWidth(for: currentKind)
+        }
         onActiveTool?(currentKind)
         notifyWidthDisplay()
         refreshCursorRects()
@@ -691,7 +687,6 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
     func setCurrentWidth(_ width: CGFloat) {
         strokeWidth = width
-        widthByKind[currentKind] = width   // remember per tool
         if let i = selectedIndex, i < shapes.count,
            strokeWidthKinds.contains(shapes[i].kind) {
             pushState()
