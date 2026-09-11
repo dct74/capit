@@ -153,6 +153,18 @@ final class CaptureController {
         }
     }
 
+    /// Opens the annotation editor on a user-imported image (jpg/png), after applying the
+    /// same rounded-corner + soft-shadow treatment used for captures. Saved as PNG.
+    func openImportedImage(_ image: CGImage) {
+        IdleAutoQuit.shared.reset()
+        Task { @MainActor in
+            let processed = await postProcess(image)
+            if let editor = AnnotationEditorController(image: processed, fileURL: nil) {
+                editor.present()
+            }
+        }
+    }
+
     // MARK: - Overlay
 
     func cancelActiveOverlay() {

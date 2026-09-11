@@ -1,5 +1,6 @@
 import Cocoa
 import Carbon
+import UniformTypeIdentifiers
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -201,6 +202,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         region.keyEquivalentModifierMask = [.command, .shift]
         menu.addItem(region)
         menu.addItem(.separator())
+        let editor = NSMenuItem(title: "编辑器",
+                                action: #selector(openEditor),
+                                keyEquivalent: "e")
+        editor.keyEquivalentModifierMask = [.command]
+        menu.addItem(editor)
+        menu.addItem(withTitle: "版本", action: #selector(showVersion), keyEquivalent: "")
+        menu.addItem(.separator())
         menu.addItem(withTitle: "退出 Capit", action: #selector(quit), keyEquivalent: "q")
 
         item.menu = menu
@@ -215,6 +223,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func captureInteractive() {
         CaptureController.shared.startInteractive()
+    }
+
+    /// Menu → 编辑器: pick a local jpg/png, add the shadow treatment, and open the editor.
+    @objc private func openEditor() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.png, .jpeg]
+        panel.prompt = "导入并标注"
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url,
+              let nsImage = NSImage(contentsOf: url),
+              let cg = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+        CaptureController.shared.openImportedImage(cg)
+    }
+
+    /// Menu → 版本: show the current bundle version.
+    @objc private func showVersion() {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        let alert = NSAlert()
+        alert.messageText = "Capit"
+        alert.informativeText = "版本 \(short)（构建 \(build)）\n\n菜单栏截图标注工具。"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "好")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     @objc private func quit() {
