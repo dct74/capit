@@ -606,6 +606,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         currentKind = kind
         strokeColor = colorFor(kind)
         strokeWidth = defaultWidth(for: kind)
+        lineDashed = false   // line style falls back to solid when switching tools/shapes
         notifyWidthDisplay()
         onActiveTool?(kind)
         refreshCursorRects()
