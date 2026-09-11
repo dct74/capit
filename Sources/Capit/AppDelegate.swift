@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Carbon hot-key IDs (arbitrary) + virtual key codes.
     private let fullID9: UInt32 = 1, regionID0: UInt32 = 2
     private let fullID3: UInt32 = 3, regionID4: UInt32 = 4
+    private let editorID: UInt32 = 5
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBar()
@@ -31,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotKeys.unregister(id: regionID0)
         hotKeys.unregister(id: fullID3)
         hotKeys.unregister(id: regionID4)
+        hotKeys.unregister(id: editorID)
     }
 
     /// Lets any in-flight capture write finish before the app quits, so a just-landed
@@ -53,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 switch id {
                 case self.fullID9, self.fullID3: CaptureController.shared.captureFullScreen()
                 case self.regionID0, self.regionID4: CaptureController.shared.startInteractive()
+                case self.editorID: self.openEditor()
                 default: break
                 }
             }
@@ -62,6 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = hotKeys.register(id: regionID0, keyCode: 29, modifiers: cmdShift)  // '0'
         _ = hotKeys.register(id: fullID3, keyCode: 20, modifiers: cmdShift)    // '3'
         _ = hotKeys.register(id: regionID4, keyCode: 21, modifiers: cmdShift)  // '4'
+        _ = hotKeys.register(id: editorID, keyCode: 14, modifiers: UInt32(cmdKey))  // ⌘E
     }
 
 #if DEBUG
@@ -207,7 +211,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                 keyEquivalent: "e")
         editor.keyEquivalentModifierMask = [.command]
         menu.addItem(editor)
-        menu.addItem(withTitle: "版本", action: #selector(showVersion), keyEquivalent: "")
+        menu.addItem(withTitle: "关于", action: #selector(showAbout), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "退出 Capit", action: #selector(quit), keyEquivalent: "q")
 
@@ -240,14 +244,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         CaptureController.shared.openImportedImage(cg)
     }
 
-    /// Menu → 版本: show the current bundle version.
-    @objc private func showVersion() {
+    /// Menu → 关于: show the current version.
+    @objc private func showAbout() {
         let info = Bundle.main.infoDictionary
-        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
-        let build = info?["CFBundleVersion"] as? String ?? "?"
+        let short = info?["CFBundleShortVersionString"] as? String ?? "0.3"
         let alert = NSAlert()
-        alert.messageText = "Capit"
-        alert.informativeText = "版本 \(short)（构建 \(build)）\n\n菜单栏截图标注工具。"
+        alert.messageText = "关于 Capit"
+        alert.informativeText = "版本 v\(short)\n\n菜单栏截图标注工具。"
         alert.alertStyle = .informational
         alert.addButton(withTitle: "好")
         NSApp.activate(ignoringOtherApps: true)
