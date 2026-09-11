@@ -181,6 +181,12 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         window.delegate = self
     }
 
+    /// Brings an already-open editor to the front (used instead of opening a second one).
+    func bringToFront() {
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     func windowWillClose(_ notification: Notification) {
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         observers.forEach { NotificationCenter.default.removeObserver($0) }

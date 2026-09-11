@@ -231,6 +231,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Menu → 编辑器: pick a local jpg/png, add the shadow treatment, and open the editor.
     @objc private func openEditor() {
+        // Never open a second editor: bring the existing one forward instead.
+        if let existing = AnnotationHolder.shared.active {
+            existing.bringToFront()
+            return
+        }
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
@@ -240,14 +245,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         guard panel.runModal() == .OK, let url = panel.url,
               let nsImage = NSImage(contentsOf: url),
-              let cg = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+              let cg = Self.normalizedCGImage(from: nsImage) else { return }
         CaptureController.shared.openImportedImage(cg)
+    }
+
+    /// Bakes any EXIF orientation into the pixels so a rotated JPEG doesn't come in sideways.
+    private static func normalizedCGImage(from image: NSImage) -> CGImage? {
+        let px = image.representations.first?.pixelsWide ?? Int(image.size.width)
+        let py = image.representations.first?.pixelsHigh ?? Int(image.size.height)
+        guard px > 0, py > 0,
+              let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: px, pixelsHigh: py,
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                         isPlanar: false, colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0),
+              let gc = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = gc
+        gc.imageInterpolation = .high
+        image.draw(in: NSRect(x: 0, y: 0, width: px, height: py))
+        gc.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+        return rep.cgImage
     }
 
     /// Menu → 关于: show the current version.
     @objc private func showAbout() {
         let info = Bundle.main.infoDictionary
-        let short = info?["CFBundleShortVersionString"] as? String ?? "0.3"
+        let short = info?["CFBundleShortVersionString"] as? String ?? "0.4"
         let alert = NSAlert()
         alert.messageText = "关于 Capit"
         alert.informativeText = "版本 v\(short)\n\n菜单栏截图标注工具。"
