@@ -358,7 +358,7 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
                 try CapturePipeline.write(image: snapshot, to: url)
                 outcome = .success
             } catch {
-                outcome = .failure("无法写入文件：\n\(error.localizedDescription)")
+                outcome = .failure("无法保存：\(error.localizedDescription)")
             }
             DispatchQueue.main.async { self.finishSave(outcome) }
         }

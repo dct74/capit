@@ -7,6 +7,7 @@ enum CaptureError: Error, LocalizedError {
     case noShareableContent
     case noDisplay
     case imageCreationFailed
+    case imageWriteFailed
     case cancelled
 
     var errorDescription: String? {
@@ -15,6 +16,7 @@ enum CaptureError: Error, LocalizedError {
         case .noShareableContent: return "无法获取屏幕内容。"
         case .noDisplay: return "找不到可截取的显示器。"
         case .imageCreationFailed: return "截图图像生成失败。"
+        case .imageWriteFailed: return "无法编码或写入 PNG 图像。"
         case .cancelled: return "已取消截图。"
         }
     }

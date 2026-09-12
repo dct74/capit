@@ -57,14 +57,14 @@ enum CapturePipeline {
         guard let dest = CGImageDestinationCreateWithURL(url as CFURL,
                                                          UTType.png.identifier as CFString,
                                                          1, nil) else {
-            throw CaptureError.imageCreationFailed
+            throw CaptureError.imageWriteFailed
         }
         let props: [CFString: Any] = [
             kCGImagePropertyPNGDictionary: [kCGImagePropertyPNGDescription: processedMarker]
         ]
         CGImageDestinationAddImage(dest, image, props as CFDictionary)
         guard CGImageDestinationFinalize(dest) else {
-            throw CaptureError.imageCreationFailed
+            throw CaptureError.imageWriteFailed
         }
     }
 

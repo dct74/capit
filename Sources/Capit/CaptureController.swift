@@ -158,9 +158,18 @@ final class CaptureController {
     /// (geometric heuristic) — are opened as-is; everything else gets the treatment.
     func openImportedImage(_ image: CGImage, sourceURL: URL?) {
         IdleAutoQuit.shared.reset()
+        // Marker check is a cheap file read; the geometric heuristic (which downscales the
+        // image) runs off the main thread.
         let tagged = sourceURL.map { CapturePipeline.isCapitProcessed(url: $0) } ?? false
-        let alreadyProcessed = tagged || ImageProcessor.alreadyRoundedOrShadowed(image)
         Task { @MainActor in
+            let alreadyProcessed: Bool
+            if tagged {
+                alreadyProcessed = true
+            } else {
+                alreadyProcessed = await Task.detached(priority: .userInitiated) {
+                    ImageProcessor.alreadyRoundedOrShadowed(image)
+                }.value
+            }
             let result = alreadyProcessed ? image : await postProcess(image)
             if let editor = AnnotationEditorController(image: result, fileURL: nil) {
                 editor.present()
