@@ -354,16 +354,11 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         // Route the encode+write through CaptureWriter so quitting waits for it too.
         CaptureWriter.schedule {
             let outcome: SaveOutcome
-            if let data = NSBitmapImageRep(cgImage: snapshot)
-                .representation(using: .png, properties: [:]) {
-                do {
-                    try data.write(to: url)
-                    outcome = .success
-                } catch {
-                    outcome = .failure("无法写入文件：\n\(error.localizedDescription)")
-                }
-            } else {
-                outcome = .failure("无法编码 PNG 图像。")
+            do {
+                try CapturePipeline.write(image: snapshot, to: url)
+                outcome = .success
+            } catch {
+                outcome = .failure("无法写入文件：\n\(error.localizedDescription)")
             }
             DispatchQueue.main.async { self.finishSave(outcome) }
         }

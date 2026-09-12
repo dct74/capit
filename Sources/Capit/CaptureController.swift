@@ -153,13 +153,16 @@ final class CaptureController {
         }
     }
 
-    /// Opens the annotation editor on a user-imported image (jpg/png), after applying the
-    /// same rounded-corner + soft-shadow treatment used for captures. Saved as PNG.
-    func openImportedImage(_ image: CGImage) {
+    /// Opens the annotation editor on a user-imported image (jpg/png). Images that are
+    /// already rounded+shadowed — Capit's own PNGs (marker) or a native window screenshot
+    /// (geometric heuristic) — are opened as-is; everything else gets the treatment.
+    func openImportedImage(_ image: CGImage, sourceURL: URL?) {
         IdleAutoQuit.shared.reset()
+        let tagged = sourceURL.map { CapturePipeline.isCapitProcessed(url: $0) } ?? false
+        let alreadyProcessed = tagged || ImageProcessor.alreadyRoundedOrShadowed(image)
         Task { @MainActor in
-            let processed = await postProcess(image)
-            if let editor = AnnotationEditorController(image: processed, fileURL: nil) {
+            let result = alreadyProcessed ? image : await postProcess(image)
+            if let editor = AnnotationEditorController(image: result, fileURL: nil) {
                 editor.present()
             }
         }

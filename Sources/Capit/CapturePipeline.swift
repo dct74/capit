@@ -1,5 +1,7 @@
 import Cocoa
 import CoreGraphics
+import ImageIO
+import UniformTypeIdentifiers
 
 /// Persists captured images. Holds desktop/temp path helpers and tracks off-main writes so
 /// the app can wait for the last one before quitting.
@@ -46,13 +48,33 @@ enum CapturePipeline {
         return url
     }
 
-    /// Encodes `image` as PNG at `url`.
+    /// Marker written into every PNG Capit exports, so re-importing our own output doesn't
+    /// get rounded/shadowed a second time.
+    static let processedMarker = "CapitProcessed"
+
+    /// Encodes `image` as PNG at `url`, tagging it as already rounded+shadowed.
     static func write(image: CGImage, to url: URL) throws {
-        let rep = NSBitmapImageRep(cgImage: image)
-        guard let data = rep.representation(using: .png, properties: [:]) else {
+        guard let dest = CGImageDestinationCreateWithURL(url as CFURL,
+                                                         UTType.png.identifier as CFString,
+                                                         1, nil) else {
             throw CaptureError.imageCreationFailed
         }
-        try data.write(to: url)
+        let props: [CFString: Any] = [
+            kCGImagePropertyPNGDictionary: [kCGImagePropertyPNGDescription: processedMarker]
+        ]
+        CGImageDestinationAddImage(dest, image, props as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else {
+            throw CaptureError.imageCreationFailed
+        }
+    }
+
+    /// True if the PNG at `url` was written by Capit (carries the processed marker).
+    static func isCapitProcessed(url: URL) -> Bool {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let png = props[kCGImagePropertyPNGDictionary] as? [CFString: Any],
+              let desc = png[kCGImagePropertyPNGDescription] as? String else { return false }
+        return desc == processedMarker
     }
 }
 

@@ -43,6 +43,51 @@ enum ImageProcessor {
         return rep.cgImage
     }
 
+    /// Heuristic: true when `image` already looks like a rounded-corner + shadowed "card"
+    /// (our own output, or a native macOS window screenshot), so it should not be processed
+    /// again. Requires an alpha channel, fully transparent image corners, an opaque centre,
+    /// content that fills most of the frame, and transparent *content* corners (rounded).
+    static func alreadyRoundedOrShadowed(_ image: CGImage) -> Bool {
+        let ai = image.alphaInfo
+        guard ai != .none, ai != .noneSkipLast, ai != .noneSkipFirst else { return false }
+
+        let maxSide = 256
+        let scale = min(1.0, CGFloat(maxSide) / CGFloat(max(image.width, image.height)))
+        let w = max(8, Int(CGFloat(image.width) * scale))
+        let h = max(8, Int(CGFloat(image.height) * scale))
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                                  bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let raw = ctx.data else { return false }
+        let p = raw.assumingMemoryBound(to: UInt8.self)
+        func a(_ x: Int, _ y: Int) -> Int { Int(p[(y * w + x) * 4 + 3]) }
+
+        // Image corners must be transparent.
+        let opaque = 40
+        guard a(0, 0) < opaque, a(w - 1, 0) < opaque, a(0, h - 1) < opaque, a(w - 1, h - 1) < opaque else { return false }
+        // ...and there must be actual content in the middle.
+        guard a(w / 2, h / 2) >= opaque else { return false }
+
+        // Content bounding box (first opaque pixel from each side).
+        func rowHasOpaque(_ y: Int) -> Bool { (0..<w).contains { a($0, y) >= opaque } }
+        func colHasOpaque(_ x: Int) -> Bool { (0..<h).contains { a(x, $0) >= opaque } }
+        guard let bx0 = (0..<w).first(where: colHasOpaque),
+              let bx1 = (0..<w).reversed().first(where: colHasOpaque),
+              let by0 = (0..<h).first(where: rowHasOpaque),
+              let by1 = (0..<h).reversed().first(where: rowHasOpaque) else { return false }
+
+        let coverW = CGFloat(bx1 - bx0 + 1) / CGFloat(w)
+        let coverH = CGFloat(by1 - by0 + 1) / CGFloat(h)
+        guard coverW >= 0.70, coverH >= 0.50 else { return false }
+
+        // The content's own corners must be transparent → it is a rounded rectangle
+        // (not, say, a square image with a transparent border).
+        guard a(bx0, by0) < opaque, a(bx1, by0) < opaque,
+              a(bx0, by1) < opaque, a(bx1, by1) < opaque else { return false }
+        return true
+    }
+
     /// Adds a native-style drop shadow around an already-rounded image on a padded
     /// transparent canvas.
     static func windowWithShadow(content: CGImage,

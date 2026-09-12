@@ -246,7 +246,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard panel.runModal() == .OK, let url = panel.url,
               let nsImage = NSImage(contentsOf: url),
               let cg = Self.normalizedCGImage(from: nsImage) else { return }
-        CaptureController.shared.openImportedImage(cg)
+        CaptureController.shared.openImportedImage(cg, sourceURL: url)
     }
 
     /// Bakes any EXIF orientation into the pixels so a rotated JPEG doesn't come in sideways.
