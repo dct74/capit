@@ -271,7 +271,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Menu → 关于: show the current version.
     @objc private func showAbout() {
         let info = Bundle.main.infoDictionary
-        let short = info?["CFBundleShortVersionString"] as? String ?? "0.4"
+        let short = info?["CFBundleShortVersionString"] as? String ?? "0.5"
         let alert = NSAlert()
         alert.messageText = "关于 Capit"
         alert.informativeText = "版本 v\(short)\n\n菜单栏截图标注工具。"
