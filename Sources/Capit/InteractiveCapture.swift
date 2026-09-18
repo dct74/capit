@@ -75,17 +75,8 @@ final class InteractiveCaptureController: NSObject {
         // (its menu bar / open menus / popovers stay put and remain capturable) — like the
         // native screenshot UI. `.nonactivatingPanel` still lets the overlay become key so
         // ESC / space are received.
-        w.makeKeyAndOrderFront(nil)
-        w.makeFirstResponder(content)
-
+        w.orderFrontRegardless()
         installKeyMonitor()
-
-        // Re-affirm key window a beat later (still without activating the app).
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
-            guard let self, let w = self.window, !w.isKeyWindow else { return }
-            w.makeKeyAndOrderFront(nil)
-            w.makeFirstResponder(self.view)
-        }
 
         watchdog = Timer.scheduledTimer(withTimeInterval: 120, repeats: false) { [weak self] _ in
             self?.cancel()
@@ -385,11 +376,21 @@ final class InteractiveCaptureController: NSObject {
 private final class OverlayWindow: NSPanel {
     convenience init(contentRect: CGRect) {
         self.init(contentRect: contentRect,
-                  styleMask: [.borderless, .nonactivatingPanel],
+                  styleMask: [.nonactivatingPanel, .titled, .fullSizeContentView],
                   backing: .buffered,
                   defer: false)
+        // Chrome-less titled panel: the standard recipe that lets a panel become key
+        // WITHOUT activating the host app.
+        titleVisibility = .hidden
+        titlebarAppearsTransparent = true
+        standardWindowButton(.closeButton)?.isHidden = true
+        standardWindowButton(.miniaturizeButton)?.isHidden = true
+        standardWindowButton(.zoomButton)?.isHidden = true
+        isMovableByWindowBackground = false
+        isFloatingPanel = true
+        hidesOnDeactivate = false
     }
-    override var canBecomeKey: Bool { true }
+    override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 }
 

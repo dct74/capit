@@ -134,9 +134,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
             CaptureController.shared.startInteractive()
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.6) {
-            CaptureController.shared.cancelActiveOverlay()
-        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.2) {
             self.selftestLog("real-path: app alive after cancel")
         }
@@ -152,13 +149,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ctl.onComplete = { result in
             self.selftestLog("onComplete \(result)")
         }
+        selftestLog("before-overlay active=\(NSApp.isActive) front=\(NSWorkspace.shared.frontmostApplication?.localizedName ?? "?")")
         ctl.run()
         selftestLog("overlay presented")
 
         for (i, delay) in [0.2, 0.5, 1.0, 1.5].enumerated() {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                self.selftestLog("poll\(i): active=\(NSApp.isActive) keyWindow=\(NSApp.keyWindow != nil) "
-                    + "selfKey=\(ctl.windowRef?.isKeyWindow ?? false)")
+                self.selftestLog("poll\(i): active=\(NSApp.isActive) front=\(NSWorkspace.shared.frontmostApplication?.localizedName ?? "?") "
+                    + "keyWindow=\(NSApp.keyWindow != nil) selfKey=\(ctl.windowRef?.isKeyWindow ?? false)")
             }
         }
 

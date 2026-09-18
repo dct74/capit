@@ -50,10 +50,6 @@ final class CaptureController {
 
     private var busy = false
 
-    /// Strong reference to the currently presented overlay so it is not deallocated
-    /// mid-session (a weak ref here caused the overlay window to be torn down early).
-    private var activeOverlay: InteractiveCaptureController?
-
     // MARK: - Entry points (menu)
 
     func captureFullScreen() {
@@ -112,36 +108,27 @@ final class CaptureController {
 
     // MARK: - Interactive (region / window)
 
+    /// Region / window selection is delegated to the system's own interactive capture UI
+    /// (`screencapture -i`), which — unlike a custom overlay — does NOT activate this app and
+    /// therefore doesn't close the frontmost app's menus / popovers. `-x` suppresses its own
+    /// shutter sound (we play ours).
     private func performInteractiveCapture() async {
         guard ensurePermission() else { return }
         do {
-            let content = try await CaptureKit.shareableContent()
             guard let screen = activeScreen() else { throw CaptureError.noDisplay }
+            let shotURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("capit_shot_\(UUID().uuidString).png")
+            defer { try? FileManager.default.removeItem(at: shotURL) }
 
-            let request = try await runOverlay(screen: screen, windows: content.windows)
+            try await runSystemInteractiveSelection(to: shotURL)
 
-            let image: CGImage
-            switch request {
-            case .region(let pixelRect):
-                let display = try display(for: screen, in: content)
-                try await Task.sleep(for: .milliseconds(150))
-                let full = try await CaptureKit.capture(display: display)
-                guard let cropped = full.cropping(to: pixelRect) else {
-                    throw CaptureError.imageCreationFailed
-                }
-                image = cropped
-            case .window(let id):
-                if #available(macOS 14.0, *),
-                   let scw = content.windows.first(where: { $0.windowID == id }),
-                   let img = try? await CaptureKit.captureWindow(scWindow: scw,
-                                                                 scale: windowScale(for: scw, in: content)) {
-                    image = img
-                } else {
-                    image = try await CaptureKit.captureWindowNative(id: id)
-                }
+            guard let ns = NSImage(contentsOf: shotURL),
+                  let image = ns.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+                throw CaptureError.imageCreationFailed
             }
-
-            let processed = await postProcess(image)
+            // A native window capture already has rounded corners (+ shadow) — don't redo it.
+            let processed = ImageProcessor.alreadyRoundedOrShadowed(image)
+                ? image : await postProcess(image)
             playSystemScreenshotSound()
             let tmp = pendingTempURL()
             try CapturePipeline.saveTemp(image: processed, url: tmp)
@@ -150,6 +137,30 @@ final class CaptureController {
         } catch {
             if case CaptureError.cancelled = error { return }
             presentError(error)
+        }
+    }
+
+    /// Runs `/usr/sbin/screencapture -i -x <url>` asynchronously; throws `.cancelled` if the
+    /// user aborted (no output file).
+    private func runSystemInteractiveSelection(to url: URL) async throws {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+            proc.arguments = ["-i", "-x", url.path]
+            proc.terminationHandler = { p in
+                let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+                let size = (attrs?[.size] as? NSNumber)?.intValue ?? 0
+                if p.terminationStatus == 0 && size > 0 {
+                    cont.resume()
+                } else {
+                    cont.resume(throwing: CaptureError.cancelled)
+                }
+            }
+            do {
+                try proc.run()
+            } catch {
+                cont.resume(throwing: error)
+            }
         }
     }
 
@@ -177,37 +188,11 @@ final class CaptureController {
         }
     }
 
-    // MARK: - Overlay
-
-    func cancelActiveOverlay() {
-        activeOverlay?.cancel()
-    }
-
-    private func runOverlay(screen: NSScreen,
-                            windows: [SCWindow]) async throws -> CaptureRequest {
-        try await withCheckedThrowingContinuation { continuation in
-            let controller = InteractiveCaptureController(screen: screen, windows: windows)
-            controller.onComplete = { [weak self] result in
-                self?.activeOverlay = nil
-                continuation.resume(with: result)
-            }
-            activeOverlay = controller
-            controller.run()
-        }
-    }
-
     // MARK: - Display / screen selection helpers
 
     private func activeScreen() -> NSScreen? {
         let mouse = NSEvent.mouseLocation
         return NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main
-    }
-
-    private func display(for screen: NSScreen?, in content: SCShareableContent) throws -> SCDisplay {
-        guard let display = pickDisplay(screen: screen, content: content) else {
-            throw CaptureError.noDisplay
-        }
-        return display
     }
 
     private func activeDisplay(from content: SCShareableContent) throws -> SCDisplay {
@@ -221,16 +206,6 @@ final class CaptureController {
         let id = screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
         let target = id?.uint32Value ?? 0
         return content.displays.first(where: { $0.displayID == target }) ?? content.displays.first
-    }
-
-    private func windowScale(for window: SCWindow, in content: SCShareableContent) -> CGFloat {
-        let c = CGPoint(x: window.frame.midX, y: window.frame.midY)
-        let display = content.displays.first { $0.frame.contains(c) }
-        guard let display else { return 2.0 }
-        let scale = NSScreen.screens.first {
-            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == display.displayID
-        }?.backingScaleFactor
-        return scale ?? 2.0
     }
 
     // MARK: - UI feedback
