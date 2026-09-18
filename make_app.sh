@@ -3,7 +3,10 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-if [ -d "/Applications/Xcode.app" ]; then
+# Optionally use Xcode's SDK when it is usable; otherwise fall back to the active
+# developer dir (xcode-select, typically Command Line Tools) — the project builds fine
+# against the CLT SDK and avoids Xcode's license prompt.
+if [ -d "/Applications/Xcode.app" ] && [ -z "${DEVELOPER_DIR:-}" ] && xcodebuild -version >/dev/null 2>&1; then
   export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
 fi
 
@@ -15,15 +18,18 @@ BIN=".build/${CONFIG}/Capit"
 echo "== swift build ($CONFIG) =="
 swift build -c "$CONFIG"
 
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+# Assemble + sign in a NON-synced temp dir first: a .app created directly under an
+# iCloud-synced folder gets FinderInfo / FileProvider xattrs that break codesigning.
+STAGE="$(mktemp -d)/${APP_NAME}.app"
+mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources"
 
-cp "$BIN" "$APP/Contents/MacOS/$APP_NAME"
+cp "$BIN" "$STAGE/Contents/MacOS/$APP_NAME"
 
 if [ -f "resources/AppIcon.icns" ]; then
-  cp "resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+  cp "resources/AppIcon.icns" "$STAGE/Contents/Resources/AppIcon.icns"
 fi
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$STAGE/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -47,14 +53,20 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-printf 'APPL????' > "$APP/Contents/PkgInfo"
+printf 'APPL????' > "$STAGE/Contents/PkgInfo"
 
-# Strip resource-fork/provenance xattrs that break ad-hoc codesigning, then sign.
-xattr -cr "$APP" 2>/dev/null || true
-find "$APP" -name '._*' -delete 2>/dev/null
-find "$APP" -exec xattr -d com.apple.provenance {} \; 2>/dev/null || true
-codesign --force --sign - "$APP/Contents/MacOS/$APP_NAME"
-codesign --force --sign - "$APP"
+# Strip resource-fork/provenance xattrs, then sign.
+xattr -cr "$STAGE" 2>/dev/null || true
+find "$STAGE" -name '._*' -delete 2>/dev/null || true
+find "$STAGE" -exec xattr -d com.apple.provenance {} \; 2>/dev/null || true
+codesign --force --sign - "$STAGE/Contents/MacOS/$APP_NAME"
+codesign --force --sign - "$STAGE"
+codesign --verify --deep "$STAGE"
+
+# Copy the signed bundle into place.
+mkdir -p build
+rm -rf "$APP"
+cp -R "$STAGE" "$APP"
 
 echo "== done: $APP =="
 echo "Launch with: open \"$APP\""

@@ -68,17 +68,21 @@ final class InteractiveCaptureController: NSObject {
         w.level = .screenSaver
         w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         w.contentView = content
+        w.becomesKeyOnlyIfNeeded = false
         window = w
 
-        NSApp.activate(ignoringOtherApps: true)
+        // Present WITHOUT activating this app, so the frontmost app keeps its active state
+        // (its menu bar / open menus / popovers stay put and remain capturable) — like the
+        // native screenshot UI. `.nonactivatingPanel` still lets the overlay become key so
+        // ESC / space are received.
         w.makeKeyAndOrderFront(nil)
         w.makeFirstResponder(content)
 
         installKeyMonitor()
 
+        // Re-affirm key window a beat later (still without activating the app).
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
             guard let self, let w = self.window, !w.isKeyWindow else { return }
-            NSApp.activate(ignoringOtherApps: true)
             w.makeKeyAndOrderFront(nil)
             w.makeFirstResponder(self.view)
         }
@@ -376,17 +380,17 @@ final class InteractiveCaptureController: NSObject {
     }
 }
 
-// MARK: - Overlay window (borderless but key-capable)
+// MARK: - Overlay window (borderless, key-capable, non-activating)
 
-private final class OverlayWindow: NSWindow {
+private final class OverlayWindow: NSPanel {
     convenience init(contentRect: CGRect) {
         self.init(contentRect: contentRect,
-                  styleMask: [.borderless],
+                  styleMask: [.borderless, .nonactivatingPanel],
                   backing: .buffered,
                   defer: false)
     }
     override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
+    override var canBecomeMain: Bool { false }
 }
 
 // MARK: - Overlay view
