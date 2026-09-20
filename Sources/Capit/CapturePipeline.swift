@@ -52,31 +52,8 @@ enum CapturePipeline {
     /// get rounded/shadowed a second time.
     static let processedMarker = "CapitProcessed"
 
-    /// Encodes `image` as PNG (default; tagged as already rounded+shadowed) or JPEG when the
-    /// destination extension is .jpg/.jpeg. JPEG has no alpha, so it is flattened over white.
+    /// Encodes `image` as PNG at `url`, tagging it as already rounded+shadowed.
     static func write(image: CGImage, to url: URL) throws {
-        let ext = url.pathExtension.lowercased()
-        if ext == "jpg" || ext == "jpeg" {
-            let cs = CGColorSpaceCreateDeviceRGB()
-            guard let ctx = CGContext(data: nil, width: image.width, height: image.height,
-                                      bitsPerComponent: 8, bytesPerRow: 0, space: cs,
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
-                throw CaptureError.imageWriteFailed
-            }
-            ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
-            ctx.fill(CGRect(x: 0, y: 0, width: image.width, height: image.height))
-            ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
-            guard let flat = ctx.makeImage(),
-                  let dest = CGImageDestinationCreateWithURL(url as CFURL,
-                                                             UTType.jpeg.identifier as CFString,
-                                                             1, nil) else {
-                throw CaptureError.imageWriteFailed
-            }
-            let opts: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: 0.9]
-            CGImageDestinationAddImage(dest, flat, opts as CFDictionary)
-            guard CGImageDestinationFinalize(dest) else { throw CaptureError.imageWriteFailed }
-            return
-        }
         guard let dest = CGImageDestinationCreateWithURL(url as CFURL,
                                                          UTType.png.identifier as CFString,
                                                          1, nil) else {

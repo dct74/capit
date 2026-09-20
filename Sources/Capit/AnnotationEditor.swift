@@ -349,7 +349,14 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         guard let out = ctx.makeImage() else { return }
         let url: URL
         if let fileURL {
-            url = fileURL
+            // Imported JPG/JPEG converts to a PNG next to the source; everything else
+            // overwrites its source file.
+            let ext = fileURL.pathExtension.lowercased()
+            if isImported && (ext == "jpg" || ext == "jpeg") {
+                url = fileURL.deletingPathExtension().appendingPathExtension("png")
+            } else {
+                url = fileURL
+            }
         } else {
             url = CapturePipeline.desktopURL()
         }
