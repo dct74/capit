@@ -140,6 +140,9 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
     private let toolbar: ToolbarView
     private let image: CGImage
     private let fileURL: URL?
+    /// Imported images: saving overwrites the source file, and closing without saving must
+    /// NOT overwrite it with the un-annotated capture.
+    private let isImported: Bool
     private let docSize: CGSize
     private var didSave = false
     private var isSaving = false
@@ -157,9 +160,10 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         sv.magnification = fit
     }
 
-    init?(image: CGImage, fileURL: URL?) {
+    init?(image: CGImage, fileURL: URL?, isImported: Bool = false) {
         self.image = image
         self.fileURL = fileURL
+        self.isImported = isImported
         docSize = CGSize(width: CGFloat(image.width) / 2,
                          height: CGFloat(image.height) / 2)
 
@@ -192,7 +196,7 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         toolbar.detachColorPanelTarget()
         // If the user closed without ever saving, land the (un-annotated) capture.
-        if !didSave && !isSaving && !rawLandingQueued, let url = fileURL {
+        if !isImported, !didSave && !isSaving && !rawLandingQueued, let url = fileURL {
             rawLandingQueued = true
             let img = image
             CaptureWriter.schedule { try? CapturePipeline.write(image: img, to: url) }
@@ -206,7 +210,7 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
     /// Called just before the app quits: queues the capture so a quit during editing
     /// doesn't lose it, and the app can wait for the write via `CaptureWriter`.
     func ensureCapturedBeforeQuit() {
-        if !didSave && !isSaving && !rawLandingQueued, let url = fileURL {
+        if !isImported, !didSave && !isSaving && !rawLandingQueued, let url = fileURL {
             rawLandingQueued = true
             let img = image
             CaptureWriter.schedule { try? CapturePipeline.write(image: img, to: url) }
@@ -719,10 +723,10 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private static var caretCache: [CGFloat: NSCursor] = [:]
 
     private func currentCursor() -> NSCursor {
+        guard hasActiveTool else { return .arrow }
         switch currentKind {
-        case .mosaic: return NSCursor.crosshair
         case .highlighter: return Self.highlighterCaret(width: strokeWidth)
-        default: return NSCursor.arrow
+        default: return NSCursor.crosshair   // rect/ellipse/arrow/line/text/number/mosaic
         }
     }
 

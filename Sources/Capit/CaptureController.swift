@@ -182,7 +182,7 @@ final class CaptureController {
                 }.value
             }
             let result = alreadyProcessed ? image : await postProcess(image)
-            if let editor = AnnotationEditorController(image: result, fileURL: nil) {
+            if let editor = AnnotationEditorController(image: result, fileURL: sourceURL, isImported: true) {
                 editor.present()
             }
         }
