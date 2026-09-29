@@ -30,14 +30,21 @@
 
 ## 构建与打包
 
+本机约定：所有仓库统一放在 `~/Documents/projects/` 下，本项目路径为 `~/Documents/projects/capit`。
+
 ```bash
-# 仅编译可执行文件
+# 1) 克隆（若尚未克隆）
+cd ~/Documents/projects
+git clone git@github.com:dct74/capit.git
+cd capit
+
+# 2) 仅编译可执行文件
 swift build -c release
 
-# 打 .app（ad-hoc 签名，写入 build/Capit.app）
+# 3) 打 .app（ad-hoc 签名，写入 build/Capit.app）
 ./make_app.sh release
 
-# 启动
+# 4) 启动
 open build/Capit.app
 ```
 
@@ -60,7 +67,7 @@ open build/Capit.app
 
 ## 仓库 / 许可
 
-- 源码仓库：`git@github.com:dct74/capit.git`（SSH）
+- 源码仓库：`git@github.com:dct74/capit.git`（SSH）；本机路径 `~/Documents/projects/capit`。
 - 以源码构建时，`.build/` 与 `build/` 为本地产物，已在 `.gitignore` 中排除。
 - 许可：MIT（见 `LICENSE`）。
 
