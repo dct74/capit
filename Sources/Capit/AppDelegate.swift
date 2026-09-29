@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var statusItem: NSStatusItem?
+    private var autoQuitItem: NSMenuItem?
     #if DEBUG
     private var selftestController: InteractiveCaptureController?
     #endif
@@ -19,7 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBar()
         registerGlobalHotKeys()
-        IdleAutoQuit.shared.start()
+        IdleAutoQuit.shared.refresh()
 #if DEBUG
         runSelfTestIfRequested()
         runRealPathSelfTestIfRequested()
@@ -209,6 +210,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                 keyEquivalent: "e")
         editor.keyEquivalentModifierMask = [.command]
         menu.addItem(editor)
+        let autoQuit = NSMenuItem(title: "空闲 10 分钟后自动退出",
+                                  action: #selector(toggleAutoQuit), keyEquivalent: "")
+        autoQuit.target = self
+        autoQuit.state = IdleAutoQuit.isEnabled ? .on : .off
+        autoQuitItem = autoQuit
+        menu.addItem(autoQuit)
         menu.addItem(withTitle: "关于", action: #selector(showAbout), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "退出 Capit", action: #selector(quit), keyEquivalent: "q")
@@ -269,7 +276,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Menu → 关于: show the current version.
     @objc private func showAbout() {
         let info = Bundle.main.infoDictionary
-        let short = info?["CFBundleShortVersionString"] as? String ?? "0.7"
+        let short = info?["CFBundleShortVersionString"] as? String ?? "0.8"
         let alert = NSAlert()
         alert.messageText = "关于 Capit"
         alert.informativeText = "版本 v\(short)\n\n菜单栏截图标注工具。"
@@ -281,5 +288,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quit() {
         NSApplication.shared.terminate(nil)
+    }
+
+    /// Menu → 空闲自动退出: opt in/out of quitting after 10 minutes of inactivity.
+    @objc private func toggleAutoQuit() {
+        let enabled = !IdleAutoQuit.isEnabled
+        IdleAutoQuit.isEnabled = enabled
+        autoQuitItem?.state = enabled ? .on : .off
     }
 }

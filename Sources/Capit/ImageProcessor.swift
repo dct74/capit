@@ -130,4 +130,23 @@ enum ImageProcessor {
         NSGraphicsContext.restoreGraphicsState()
         return rep.cgImage
     }
+
+    /// Small preview thumbnail (never upscales). The full-resolution PNG already lives on disk,
+    /// so the on-screen preview uses this instead of retaining a full-size screenshot.
+    /// 2048 px covers the preview size (1/8 screen) even on 6K/8K Retina displays.
+    static func thumbnail(from image: CGImage, maxPixel: Int = 2048) -> CGImage? {
+        let w = image.width, h = image.height
+        let longest = max(w, h)
+        guard longest > 0 else { return nil }
+        let scale = min(1.0, CGFloat(maxPixel) / CGFloat(longest))
+        let tw = max(1, Int((CGFloat(w) * scale).rounded()))
+        let th = max(1, Int((CGFloat(h) * scale).rounded()))
+        guard let ctx = CGContext(data: nil, width: tw, height: th,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.interpolationQuality = .high
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: tw, height: th))
+        return ctx.makeImage()
+    }
 }

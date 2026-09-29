@@ -3,11 +3,25 @@ import ScreenCaptureKit
 
 /// Auto-quits the app after `interval` with no screenshot activity (any new capture or the
 /// annotation editor being opened resets the countdown). Only used on the main thread.
+///
+/// This is opt-in: the user enables it from the menu, and the choice is persisted. By default
+/// the app never auto-quits on idle.
 final class IdleAutoQuit {
     static let shared = IdleAutoQuit()
     private init() {}
 
     static let interval: TimeInterval = 10 * 60
+    private static let defaultsKey = "CapitAutoQuitOnIdle"
+
+    /// User preference: whether to auto-quit after the idle interval. Defaults to false.
+    static var isEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: defaultsKey) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: defaultsKey)
+            shared.refresh()
+        }
+    }
+
     /// Effective interval — overridable for testing via CAPIT_IDLE_SECONDS.
     static var effectiveInterval: TimeInterval {
         if let s = ProcessInfo.processInfo.environment["CAPIT_IDLE_SECONDS"],
@@ -17,22 +31,31 @@ final class IdleAutoQuit {
         return interval
     }
     private var timer: Timer?
-    private var enabled = false
+    private var paused = false
 
-    func start() {
-        enabled = true
+    /// (Re)applies the user preference and pause state. Call once at launch.
+    func refresh() {
+        timer?.invalidate()
+        timer = nil
+        guard Self.isEnabled, !paused else { return }
         reset()
     }
 
-    func stop() {
-        enabled = false
-        timer?.invalidate()
-        timer = nil
+    /// Pauses the countdown (used while the annotation editor is open).
+    func pause() {
+        paused = true
+        refresh()
+    }
+
+    /// Resumes after a pause, respecting the user preference.
+    func resume() {
+        paused = false
+        refresh()
     }
 
     /// Restarts the countdown (called on any screenshot activity).
     func reset() {
-        guard enabled else { return }
+        guard Self.isEnabled, !paused else { return }
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: Self.effectiveInterval,
                                      repeats: false) { _ in
@@ -216,30 +239,32 @@ final class CaptureController {
     }
 
     private func presentPending(_ image: CGImage, screen: NSScreen, finalURL: URL, tmpURL: URL) {
-        PreviewPresenter.shared.present(image: image, fileURL: finalURL, screen: screen,
-            onExpire: { [weak self] _, _ in
-                let img = image
-                let url = finalURL
+        // The preview only displays a small thumbnail: the full-resolution PNG is already on
+        // disk, and keeping the processed image here would hold tens of MB for the whole 4s.
+        let thumb = ImageProcessor.thumbnail(from: image) ?? image
+        PreviewPresenter.shared.present(image: thumb, screen: screen,
+            onExpire: { [weak self] in
                 CaptureWriter.schedule {
                     do {
-                        try CapturePipeline.write(image: img, to: url)
-                        NSLog("[Capit] 已保存到桌面: \(url.path)")
+                        try CapturePipeline.landPending(from: tmpURL, to: finalURL)
+                        NSLog("[Capit] 已保存到桌面: \(finalURL.path)")
                     } catch {
                         await MainActor.run { self?.presentError(error) }
                     }
                 }
-                try? FileManager.default.removeItem(at: tmpURL)
             },
-            onOpen: { [weak self] img, url in
-                self?.openAnnotationWindow(img, fileURL: url)
-                try? FileManager.default.removeItem(at: tmpURL)
+            onOpen: { [weak self] in
+                self?.openAnnotationWindow(loadingFrom: tmpURL, fileURL: finalURL)
             })
     }
 
-    private func openAnnotationWindow(_ image: CGImage, fileURL: URL?) {
-        if let editor = AnnotationEditorController(image: image, fileURL: fileURL) {
-            editor.present()
-        }
+    /// Opens the editor on the pending PNG just landed in the temp cache.
+    private func openAnnotationWindow(loadingFrom tmpURL: URL, fileURL: URL) {
+        guard let ns = NSImage(contentsOf: tmpURL),
+              let image = ns.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let editor = AnnotationEditorController(image: image, fileURL: fileURL) else { return }
+        try? FileManager.default.removeItem(at: tmpURL)
+        editor.present()
     }
 
     private func playSystemScreenshotSound() {

@@ -2,10 +2,10 @@ import Cocoa
 
 /// The bottom-right preview thumbnail shown after a screenshot: fades in near the bottom-right
 /// corner, draggable, fades away after a few seconds, and a click opens the annotation editor.
+/// Only holds the small display thumbnail — the full-resolution PNG lives on disk.
 final class PreviewWindowController: NSObject {
     private var panel: NSPanel?
     private let image: CGImage
-    private let fileURL: URL?
     private let screen: NSScreen
 
     private var downPoint: CGPoint?
@@ -13,13 +13,12 @@ final class PreviewWindowController: NSObject {
     private var dismissed = false
     private var dismissTimer: Timer?
 
-    var onOpen: ((CGImage, URL?) -> Void)?
-    var onExpire: ((CGImage, URL?) -> Void)?
+    var onOpen: (() -> Void)?
+    var onExpire: (() -> Void)?
     static let displayDuration: TimeInterval = 4.0
 
-    init(image: CGImage, fileURL: URL?, screen: NSScreen) {
+    init(image: CGImage, screen: NSScreen) {
         self.image = image
-        self.fileURL = fileURL
         self.screen = screen
         super.init()
     }
@@ -64,7 +63,7 @@ final class PreviewWindowController: NSObject {
 
     private func timeout() {
         guard !dismissed else { return }
-        onExpire?(image, fileURL)
+        onExpire?()
         dismiss()
     }
 
@@ -73,7 +72,7 @@ final class PreviewWindowController: NSObject {
     /// ever on screen.
     func finalizePending() {
         guard !dismissed else { return }
-        onExpire?(image, fileURL)
+        onExpire?()
         dismiss()
     }
 
@@ -111,7 +110,7 @@ final class PreviewWindowController: NSObject {
     func mouseUp(_ point: CGPoint) {
         if !moved {
             dismiss()
-            onOpen?(image, fileURL)
+            onOpen?()
         }
         downPoint = nil
     }
@@ -123,14 +122,14 @@ final class PreviewPresenter {
     private init() {}
     var active: PreviewWindowController?
 
-    func present(image: CGImage, fileURL: URL?, screen: NSScreen,
-                 onExpire: ((CGImage, URL?) -> Void)? = nil,
-                 onOpen: @escaping (CGImage, URL?) -> Void) {
+    func present(image: CGImage, screen: NSScreen,
+                 onExpire: (() -> Void)? = nil,
+                 onOpen: @escaping () -> Void) {
         // Only one preview at a time: land + dismiss any still-pending one first.
         if let prev = active {
             prev.finalizePending()
         }
-        let c = PreviewWindowController(image: image, fileURL: fileURL, screen: screen)
+        let c = PreviewWindowController(image: image, screen: screen)
         c.onExpire = onExpire
         c.onOpen = onOpen
         active = c

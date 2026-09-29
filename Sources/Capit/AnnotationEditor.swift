@@ -204,7 +204,7 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         NSApp.setActivationPolicy(.accessory)
         AnnotationHolder.shared.active = nil
         // Resume the idle auto-quit countdown now that no editor is open.
-        IdleAutoQuit.shared.start()
+        IdleAutoQuit.shared.resume()
     }
 
     /// Called just before the app quits: queues the capture so a quit during editing
@@ -221,7 +221,7 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         AnnotationHolder.shared.active = self
         // Pause the idle auto-quit while the editor is open so a long annotation session is
         // never terminated mid-edit (which would land only the raw image).
-        IdleAutoQuit.shared.stop()
+        IdleAutoQuit.shared.pause()
         let content = NSView()
         content.addSubview(toolbar)
 
@@ -326,10 +326,18 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         guard !isSaving else { return }
         canvas.commitTextEditor()
         let w = image.width, h = image.height
-        guard let colorSpace = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB),
-              let ctx = CGContext(data: nil, width: w, height: h,
-                                  bitsPerComponent: 8, bytesPerRow: 0, space: colorSpace,
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+        let bytesPerRow = ((w * 4) + 63) & ~63
+        let colorSpace = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
+        // Back the context with a manually-managed buffer so the finished pixels can be handed
+        // to a CGImage without `makeImage()`'s full-size copy (half the memory at save peak).
+        let buffer = UnsafeMutableRawPointer.allocate(byteCount: bytesPerRow * h, alignment: 64)
+        guard let ctx = CGContext(data: buffer, width: w, height: h,
+                                  bitsPerComponent: 8, bytesPerRow: bytesPerRow, space: colorSpace,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            buffer.deallocate()
+            presentSaveFailure(message: "无法创建图像缓冲区。")
+            return
+        }
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
 
         NSGraphicsContext.saveGraphicsState()
@@ -346,7 +354,12 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         g.flushGraphics()
         NSGraphicsContext.restoreGraphicsState()
 
-        guard let out = ctx.makeImage() else { return }
+        guard let out = Self.makeImage(owning: buffer, width: w, height: h,
+                                       bytesPerRow: bytesPerRow, colorSpace: colorSpace) else {
+            buffer.deallocate()
+            presentSaveFailure(message: "无法生成图像。")
+            return
+        }
         let url: URL
         if let fileURL {
             // Imported JPG/JPEG converts to a PNG next to the source; everything else
@@ -400,6 +413,24 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         a.addButton(withTitle: "好")
         NSApp.activate(ignoringOtherApps: true)
         a.runModal()
+    }
+
+    /// Wraps a manually-managed bitmap buffer in a CGImage without copying. The provider owns
+    /// the buffer and frees it when the image (and any encode using it) is released.
+    private static func makeImage(owning buffer: UnsafeMutableRawPointer,
+                                  width: Int, height: Int, bytesPerRow: Int,
+                                  colorSpace: CGColorSpace) -> CGImage? {
+        let release: CGDataProviderReleaseDataCallback = { _, data, _ in
+            UnsafeMutableRawPointer(mutating: data).deallocate()
+        }
+        guard let provider = CGDataProvider(dataInfo: nil, data: buffer,
+                                            size: bytesPerRow * height,
+                                            releaseData: release) else { return nil }
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+                       bytesPerRow: bytesPerRow, space: colorSpace,
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: false,
+                       intent: .defaultIntent)
     }
 }
 
