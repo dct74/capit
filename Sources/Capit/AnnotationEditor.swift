@@ -12,6 +12,160 @@ private enum SaveOutcome {
 private let strokeWidthKinds: Set<AnnotationShape.Kind> =
     [.rect, .ellipse, .arrow, .line, .highlighter]
 
+/// Fluorescent-marker ink strength. Kept this high because the highlighter is drawn with a
+/// multiply blend: dark content stays dark and legible instead of being washed out, so the
+/// ink can be vivid without destroying whatever is underneath it. With source-over this
+/// value would have to stay near 0.5 to keep text readable (see the ink comment in renderShape).
+private let highlighterAlpha: CGFloat = 0.85
+
+// MARK: - Highlighter marker tuning
+
+/// How much wider the wet edge is than the core of the stroke. Real felt-tip ink wicks a
+/// little past the tip's footprint.
+private let highlighterWetEdgeWidthRatio: CGFloat = 1.28
+/// Density of the wet edge relative to the core. The core's own alpha is then derived so that
+/// edge × core still multiplies to exactly `highlighterAlpha` in the middle (see drawHighlighter).
+private let highlighterWetEdgeRatio: CGFloat = 0.35
+/// Peak strength of the paper grain, i.e. how much of the ink the roughest speckle may thin
+/// out (0 = flat ink, 1 = grain can erase the ink completely).
+private let highlighterGrainStrength: CGFloat = 0.42
+/// Exponential smoothing applied to the incoming pointer while drawing freehand. Most of the
+/// visible smoothing actually comes from rendering the samples as a Catmull-Rom curve rather
+/// than a polyline: over the same samples, edge jaggedness measures ~7 px as a polyline, ~1.3 px
+/// through the spline, and ~1.0 px through the spline over these smoothed samples. Set to 1 to
+/// disable the filter entirely if the slight trailing lag is unwelcome.
+private let highlighterSmoothing: CGFloat = 0.4
+
+/// Deterministic RNG so the grain tile is identical on every run — the live canvas, the
+/// exported PNG and the verification harness all see exactly the same texture.
+private struct SplitMix64 {
+    var state: UInt64
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
+    }
+    mutating func unit() -> Double { Double(next() >> 11) * (1.0 / 9_007_199_254_740_992.0) }
+}
+
+/// Seamless value noise. The lattice indices wrap, so the tile can be drawn with
+/// `byTiling: true` without visible seams where one copy meets the next.
+private func periodicValueNoise(size: Int, lattice: Int, seed: UInt64) -> [Double] {
+    var rng = SplitMix64(state: seed)
+    let l = max(2, lattice)
+    var grid = [Double](repeating: 1, count: l * l)
+    for i in grid.indices { grid[i] = rng.unit() }
+    @inline(__always) func g(_ x: Int, _ y: Int) -> Double {
+        grid[((y % l) + l) % l * l + (((x % l) + l) % l)]
+    }
+
+    var out = [Double](repeating: 1, count: size * size)
+    let cells = Double(l)
+    let n = Double(size)
+    for y in 0..<size {
+        let fy = Double(y) / n * cells
+        let y0 = Int(fy), ty = fy - Double(y0)
+        let sy = ty * ty * (3 - 2 * ty)             // smoothstep, so no lattice creases
+        for x in 0..<size {
+            let fx = Double(x) / n * cells
+            let x0 = Int(fx), tx = fx - Double(x0)
+            let sx = tx * tx * (3 - 2 * tx)
+            let a = g(x0, y0) + (g(x0 + 1, y0) - g(x0, y0)) * sx
+            let b = g(x0, y0 + 1) + (g(x0 + 1, y0 + 1) - g(x0, y0 + 1)) * sx
+            out[y * size + x] = a + (b - a) * sy
+        }
+    }
+    return out
+}
+
+/// Rescales to 0…1 so octaves with different variance (a box blur shrinks it) mix evenly.
+private func normalized(_ a: [Double]) -> [Double] {
+    guard let lo = a.min(), let hi = a.max(), hi > lo else { return a.map { _ in 0.5 } }
+    return a.map { ($0 - lo) / (hi - lo) }
+}
+
+/// Box blur over a torus, so the tile still seams correctly after blurring.
+private func torusBlur(_ src: [Double], size: Int) -> [Double] {
+    var out = [Double](repeating: 0, count: size * size)
+    for y in 0..<size {
+        for x in 0..<size {
+            var sum = 0.0
+            for dy in -1...1 {
+                for dx in -1...1 {
+                    sum += src[((y + dy + size) % size) * size + ((x + dx + size) % size)]
+                }
+            }
+            out[y * size + x] = sum / 9
+        }
+    }
+    return out
+}
+
+/// The paper grain used to thin the highlighter's ink unevenly. Three octaves, because real
+/// paper does not have a single feature size: per-pixel speckle, ~3 px fibre clumps, and a
+/// slow ~16 px mottle. Only the alpha channel is meaningful — drawn with `.destinationOut`.
+///
+/// Note the fine octave is plain white noise and the mottle uses a deliberately coarse lattice:
+/// value noise whose lattice is close to the pixel pitch aliases into visible streaks.
+private struct GrainTile {
+    let image: CGImage
+    /// Mean of the tile's alpha. The grain only ever *removes* ink, so the core has to be
+    /// drawn denser to compensate or the marker would come out weaker than `highlighterAlpha`.
+    let meanAlpha: CGFloat
+}
+
+private func makeHighlighterGrainTile(size: Int) -> GrainTile? {
+    let count = size * size
+    var rng = SplitMix64(state: 0xC0FF_EE01_5EED)
+    let speckle = (0..<count).map { _ in rng.unit() }
+    let fibre = normalized(torusBlur(speckle, size: size))
+    let mottle = normalized(periodicValueNoise(size: size, lattice: max(4, size / 16),
+                                               seed: 0xB29F_1E33))
+    let fine = normalized(speckle)
+
+    var pixels = [UInt8](repeating: 0, count: count * 4)
+    var alphaSum = 0.0
+    for i in 0..<count {
+        var v = fine[i] * 0.25 + fibre[i] * 0.35 + mottle[i] * 0.40
+        v = min(max((v - 0.5) * 1.7 + 0.5, 0), 1)     // push contrast around mid-grey
+        let a = v * highlighterGrainStrength
+        alphaSum += a
+        let byte = UInt8((a * 255).rounded())
+        let o = i * 4
+        // Premultiplied white: R=G=B=A keeps the bitmap valid. Only alpha is consumed, so
+        // the tile works as a per-pixel knockout mask for the ink drawn into the layer.
+        pixels[o] = byte; pixels[o + 1] = byte; pixels[o + 2] = byte; pixels[o + 3] = byte
+    }
+    guard let provider = CGDataProvider(data: Data(pixels) as CFData),
+          let image = CGImage(width: size, height: size, bitsPerComponent: 8, bitsPerPixel: 32,
+                              bytesPerRow: size * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                              bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                              provider: provider, decode: nil,
+                              shouldInterpolate: true, intent: .defaultIntent) else { return nil }
+    return GrainTile(image: image, meanAlpha: CGFloat(alphaSum / Double(count)))
+}
+
+/// Built once, on first use.
+private let highlighterGrain: GrainTile? = makeHighlighterGrainTile(size: 256)
+
+/// Adds `pts` to `path` as a smooth curve through every sample (Catmull-Rom converted to
+/// cubic Béziers). A two-point stroke stays an exact straight line, so the default
+/// horizontal swipe renders byte-identically to before freehand existed.
+private func addSmoothStroke(_ pts: [CGPoint], to path: CGMutablePath) {
+    guard pts.count >= 2 else { return }
+    path.move(to: pts[0])
+    guard pts.count > 2 else { path.addLine(to: pts[1]); return }
+    for i in 0..<(pts.count - 1) {
+        let p0 = pts[max(i - 1, 0)], p1 = pts[i]
+        let p2 = pts[i + 1], p3 = pts[min(i + 2, pts.count - 1)]
+        path.addCurve(to: p2,
+                      control1: CGPoint(x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6),
+                      control2: CGPoint(x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6))
+    }
+}
+
 /// Auto continuous-corner radius for a rounded rectangle (a fraction of its shorter side).
 private func continuousRadius(for r: CGRect) -> CGFloat {
     max(4, min(r.width, r.height) * 0.2)
@@ -49,13 +203,7 @@ private func renderShape(_ shape: AnnotationShape) {
                           width: shape.strokeWidth, color: color, dashed: shape.dashed)
         }
     case .highlighter:
-        let path = NSBezierPath()
-        path.move(to: shape.start)
-        path.line(to: shape.end)
-        path.lineWidth = shape.strokeWidth
-        path.lineCapStyle = .butt
-        color.setStroke()
-        path.stroke()
+        drawHighlighter(shape, color: color)
     case .text:
         if !shape.text.isEmpty {
             let attrs: [NSAttributedString.Key: Any] = [
@@ -70,6 +218,73 @@ private func renderShape(_ shape: AnnotationShape) {
         shape.color.withAlphaComponent(1).setFill()
         NSBezierPath(rect: shape.rect).fill()
     }
+}
+
+/// Draws the highlighter as marker ink rather than as a translucent bar: a soft wet edge, a
+/// core stroke, and paper grain thinning the ink unevenly. Every pass multiplies onto the
+/// paper, so dark content underneath stays dark and legible. Both the live canvas and the
+/// export renderer call this, so the saved PNG matches the screen exactly.
+private func drawHighlighter(_ shape: AnnotationShape, color: NSColor) {
+    let pts = shape.strokePoints
+
+    guard let cg = NSGraphicsContext.current?.cgContext else {
+        // No CG context (not expected): fall back to a plain polyline stroke.
+        let path = NSBezierPath()
+        path.move(to: pts[0])
+        for p in pts.dropFirst() { path.line(to: p) }
+        path.lineWidth = shape.strokeWidth
+        path.lineCapStyle = .butt
+        path.lineJoinStyle = .round
+        color.setStroke()
+        path.stroke()
+        return
+    }
+
+    let path = CGMutablePath()
+    addSmoothStroke(pts, to: path)
+
+    // Split the density across the two passes so the core still lands on the intended alpha
+    // once both have multiplied: edge × core = 1-(1-edge)(1-core) = a.
+    let a = color.alphaComponent
+    let edgeAlpha = a * highlighterWetEdgeRatio
+    let thinned = 1 - (1 - a) / (1 - edgeAlpha)
+    // The grain only removes ink, so draw the core denser by the average amount the grain
+    // will take away — otherwise a textured stroke would read weaker than a flat one.
+    let grainMean = highlighterGrain?.meanAlpha ?? 0
+    let coreAlpha = min(thinned / max(1 - grainMean, 0.01), 1)
+
+    cg.saveGState()
+    cg.setBlendMode(.multiply)
+    cg.setLineCap(.butt)
+    cg.setLineJoin(.round)
+
+    // 1. Wet edge: a wider, fainter pass. Because both passes multiply, the fringe comes out
+    //    lighter than the core — which is how a felt tip actually deposits ink.
+    cg.setStrokeColor(color.withAlphaComponent(edgeAlpha).cgColor)
+    cg.setLineWidth(shape.strokeWidth * highlighterWetEdgeWidthRatio)
+    cg.addPath(path)
+    cg.strokePath()
+
+    // 2. Core, with the paper grain knocked into it. The grain is applied inside a
+    //    transparency layer so it can thin the ink per pixel; without the layer there would
+    //    be no way to un-bake alpha that has already been composited onto the paper. The
+    //    layer is bounded by a rectangular clip so it stays cheap to allocate.
+    let grainRect = shape.rect.insetBy(dx: -shape.strokeWidth, dy: -shape.strokeWidth)
+    cg.saveGState()
+    cg.clip(to: grainRect)
+    cg.beginTransparencyLayer(auxiliaryInfo: nil)
+    cg.setStrokeColor(color.withAlphaComponent(coreAlpha).cgColor)
+    cg.setLineWidth(shape.strokeWidth)
+    cg.addPath(path)
+    cg.strokePath()
+    if let grain = highlighterGrain {
+        cg.setBlendMode(.destinationOut)
+        cg.draw(grain.image, in: grainRect, byTiling: true)
+    }
+    cg.endTransparencyLayer()
+    cg.restoreGState()
+
+    cg.restoreGState()
 }
 
 /// Arrowhead: two non-filled arms from the tip sweeping back at 45° each (90° total); each
@@ -126,10 +341,27 @@ struct AnnotationShape {    enum Kind: String, CaseIterable {
     var text: String = ""
     var dashed = false
     var number: Int = 1
+    /// Captured freehand path for the highlighter. Empty means "no path": the renderer and the
+    /// hit test then fall back to the straight start→end chord. That is what every other kind
+    /// relies on, and what a highlighter reduced to a single click ends up with.
+    var points: [CGPoint] = []
 
+    /// The polyline the stroke tools draw: the freehand path when one was captured,
+    /// otherwise the start→end chord. Always has at least two entries.
+    var strokePoints: [CGPoint] {
+        points.count >= 2 ? points : [start, end]
+    }
+
+    /// Bounding box in document coordinates. A freehand stroke can bow away from the
+    /// start→end chord, so every captured point contributes.
     var rect: CGRect {
-        CGRect(x: min(start.x, end.x), y: min(start.y, end.y),
-               width: abs(end.x - start.x), height: abs(end.y - start.y))
+        var minX = min(start.x, end.x), maxX = max(start.x, end.x)
+        var minY = min(start.y, end.y), maxY = max(start.y, end.y)
+        for p in points {
+            minX = min(minX, p.x); maxX = max(maxX, p.x)
+            minY = min(minY, p.y); maxY = max(maxY, p.y)
+        }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 }
 
@@ -465,9 +697,13 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private var moveDown: CGPoint?
     private var moveStart0: CGPoint = .zero
     private var moveEnd0: CGPoint = .zero
+    private var movePoints0: [CGPoint] = []
     private var movePushed = false
     private let moveKinds: Set<AnnotationShape.Kind> =
         [.rect, .ellipse, .line, .arrow, .number, .text, .highlighter, .mosaic]
+    /// Upper bound on captured freehand samples; past this the path is decimated
+    /// instead of dropping the stroke.
+    private static let highlighterMaxPoints = 4096
 
     func pushState() { history.append(shapes); if history.count > 60 { history.removeFirst() }; redoHistory.removeAll() }
 
@@ -512,6 +748,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         shapes[i].start.y += dy
         shapes[i].end.x += dx
         shapes[i].end.y += dy
+        shapes[i].points = shapes[i].points.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
         needsDisplay = true
     }
 
@@ -634,7 +871,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private var colorEditHistoryPushed = false
 
     private var colorByKind: [AnnotationShape.Kind: NSColor] = [
-        .highlighter: NSColor(calibratedRed: 0.90, green: 0.68, blue: 0.0, alpha: 0.5),
+        .highlighter: NSColor(calibratedRed: 0.90, green: 0.68, blue: 0.0, alpha: highlighterAlpha),
         .mosaic: NSColor.black
     ]
     private static let defaultColor: NSColor = .red
@@ -660,10 +897,10 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
 
     func setCurrentColor(_ color: NSColor) {
-        // The highlighter is always a 50% translucent marker: whatever color is chosen gets
-        // its alpha pinned to 0.5 (per-kind).
+        // The highlighter is always the same translucent marker: whatever color is chosen
+        // gets its alpha pinned to `highlighterAlpha` (per-kind).
         func sized(_ c: NSColor, for kind: AnnotationShape.Kind) -> NSColor {
-            kind == .highlighter ? c.withAlphaComponent(0.5) : c
+            kind == .highlighter ? c.withAlphaComponent(highlighterAlpha) : c
         }
         let active = sized(color, for: currentKind)
         colorByKind[currentKind] = active
@@ -854,7 +1091,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             case .rect, .ellipse, .mosaic:
                 hit = s.rect.insetBy(dx: -4, dy: -4).contains(p)
             case .line, .arrow, .highlighter:
-                hit = dist(p, to: s.start, s.end) <= max(6, s.strokeWidth / 2 + 3)
+                hit = dist(p, to: s) <= max(6, s.strokeWidth / 2 + 3)
             case .text:
                 let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: s.fontSize)]
                 let sz = NSAttributedString(string: s.text, attributes: attrs).size()
@@ -875,6 +1112,16 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         var t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2
         t = max(0, min(1, t))
         return hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy))
+    }
+
+    /// Shortest distance from `p` to a shape's stroke polyline.
+    private func dist(_ p: CGPoint, to shape: AnnotationShape) -> CGFloat {
+        let pts = shape.strokePoints
+        var best = CGFloat.greatestFiniteMagnitude
+        for i in 0..<(pts.count - 1) {
+            best = min(best, dist(p, to: pts[i], pts[i + 1]))
+        }
+        return best
     }
 
     private func textShapeIndex(at p: CGPoint) -> Int? {
@@ -919,6 +1166,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                 moveDown = p
                 moveStart0 = shapes[idx].start
                 moveEnd0 = shapes[idx].end
+                movePoints0 = shapes[idx].points
                 movePushed = false
             }
             return
@@ -957,6 +1205,12 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             var shape = AnnotationShape(kind: currentKind, start: p, end: p,
                                         color: color, strokeWidth: strokeWidth, opacity: 1)
             if Self.outlineKinds.contains(currentKind) { shape.dashed = lineDashed }
+            if currentKind == .highlighter {
+                // Freehand by default. The samples are spline-smoothed, so the stroke reads as
+                // a marker rather than as pointer input; ⇧ constrains it to the straight
+                // horizontal bar that used to be the only option (see mouseDragged).
+                shape.points = [p]
+            }
             inProgress = shape
             dragStart = p
         }
@@ -969,6 +1223,9 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             let dx = p.x - md.x, dy = p.y - md.y
             shapes[mi].start = CGPoint(x: moveStart0.x + dx, y: moveStart0.y + dy)
             shapes[mi].end = CGPoint(x: moveEnd0.x + dx, y: moveEnd0.y + dy)
+            if !movePoints0.isEmpty {
+                shapes[mi].points = movePoints0.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
+            }
             needsDisplay = true
             return
         }
@@ -979,16 +1236,38 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             switch shape.kind {
             case .ellipse: q = constrainingCircle(start, to: q)
             case .line, .arrow: q = constrainingAngle(start, to: q)
+            // Shift on a freehand highlighter keeps the stroke horizontal.
+            case .highlighter: q.y = start.y
             default: break
             }
         }
         if shape.kind == .highlighter {
-            q.y = start.y
+            appendHighlighterPoint(q, to: &shape)
+        } else {
+            shape.start = start
+            shape.end = q
         }
-        shape.start = start
-        shape.end = q
         inProgress = shape
         needsDisplay = true
+    }
+
+    /// Appends a sampled point to a freehand highlighter stroke (⌥-started strokes only).
+    /// Samples are spaced about 1.5 *screen* points apart (so density follows the zoom level),
+    /// low-passed so pointer jitter reads as a marker stroke, and an over-long path is
+    /// decimated rather than truncated so the stroke is never lost.
+    private func appendHighlighterPoint(_ p: CGPoint, to shape: inout AnnotationShape) {
+        guard let last = shape.points.last else { return }
+        let zoom = max(enclosingScrollView?.magnification ?? 1, 0.01)
+        if hypot(p.x - last.x, p.y - last.y) < 1.5 / zoom { return }
+        let k = highlighterSmoothing
+        let smoothed = CGPoint(x: last.x + (p.x - last.x) * k, y: last.y + (p.y - last.y) * k)
+        if shape.points.count >= Self.highlighterMaxPoints {
+            shape.points = shape.points.enumerated()
+                .compactMap { $0.offset.isMultiple(of: 2) ? $0.element : nil }
+        }
+        shape.points.append(smoothed)
+        shape.start = shape.points[0]
+        shape.end = shape.points[shape.points.count - 1]
     }
 
     private func constrainingCircle(_ anchor: CGPoint, to p: CGPoint) -> CGPoint {
@@ -1013,8 +1292,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             moveIndex = nil
             moveDown = nil
         }
-        if var shape = inProgress {
-            if shape.kind == .highlighter { shape.end.y = shape.start.y }
+        if let shape = inProgress {
             if shape.rect.width < 1 && shape.rect.height < 1 {
                 inProgress = nil; needsDisplay = true; dragStart = nil; return
             }
@@ -1226,7 +1504,7 @@ final class ToolbarView: NSView {
         panel.showsAlpha = true
         if activeKind == .highlighter {
             let base = onPanelColorSeed?() ?? NSColor.black
-            panel.color = base.withAlphaComponent(0.5)
+            panel.color = base.withAlphaComponent(highlighterAlpha)
         }
         panel.makeKeyAndOrderFront(nil)
     }
@@ -1241,11 +1519,11 @@ final class ToolbarView: NSView {
 
     @objc private func colorChanged(_ sender: NSColorPanel) {
         onColor?(sender.color)
-        // Keep the highlighter's panel opacity slider pinned at 50% after each pick.
+        // Keep the highlighter's panel opacity slider pinned after each pick.
         if activeKind == .highlighter {
-            let centered = sender.color.withAlphaComponent(0.5)
+            let centered = sender.color.withAlphaComponent(highlighterAlpha)
             DispatchQueue.main.async {
-                if abs(sender.color.alphaComponent - 0.5) > 0.001 {
+                if abs(sender.color.alphaComponent - highlighterAlpha) > 0.001 {
                     sender.color = centered
                 }
             }
