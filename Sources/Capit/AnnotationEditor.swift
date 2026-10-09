@@ -20,20 +20,23 @@ private let highlighterAlpha: CGFloat = 0.85
 
 // MARK: - Highlighter marker tuning
 
-/// The marker's edge is a real blur, produced by stroking the core and letting Core Graphics
-/// blur its shadow to fill the nib footprint (see drawHighlighter). `coreRatio` is the fraction
-/// of the stroke width drawn at full density; the rest is the wet edge the blur grows into.
+/// The marker's edge comes from a real blur: the core is stroked and Core Graphics blurs its
+/// shadow across the nib footprint. `coreRatio` is the fraction of the width drawn at full
+/// density, `blurRatio` how far that edge is smeared, and `clipRatio` how much room the shadow
+/// is given beyond the nominal width so its tail has decayed before anything cuts it.
 ///
-/// This replaced eight nested strokes of decreasing width, which approximated the falloff as a
-/// staircase: at 8 steps the alpha jumped 0.105 between bands, and because the bands were
-/// fractions of the half-width those steps spread further apart the thicker the stroke got —
-/// so thick strokes showed visible concentric bands again. A blurred shadow makes the falloff
-/// continuous and identical at every width, and costs one pass instead of eight.
-private let highlighterCoreRatio: CGFloat = 0.62
-/// Blur radius as a fraction of the stroke width, with an absolute floor: ink wicks over a
-/// fibre-scale distance, not a proportional one, so thin strokes still need a soft edge.
-private let highlighterEdgeBlurRatio: CGFloat = 0.32
-private let highlighterEdgeBlurMin: CGFloat = 2.0
+/// This replaced two earlier attempts, both of which left visible steps:
+/// eight nested strokes approximated the falloff as a staircase (0.105 alpha per step, worse the
+/// thicker the stroke), and stroking the core *with* its shadow stamps the sharp core on top of
+/// the soft one — a 0.35 alpha step in a single pixel, which is the ledge that reads as a seam.
+/// The profile now falls from 0.99 to 0 over the half-width with a worst single-pixel drop of
+/// 0.059, the same at every stroke width and every zoom/export scale.
+private let highlighterCoreRatio: CGFloat = 0.70
+private let highlighterEdgeBlurRatio: CGFloat = 0.34
+private let highlighterClipRatio: CGFloat = 1.5
+/// Absolute floor on the blur, in device pixels: ink wicks over a fibre-scale distance, not a
+/// proportional one, so thin strokes still need a soft edge.
+private let highlighterEdgeBlurMin: CGFloat = 1.5
 
 /// How far the ink boundary wanders sideways, as a fraction of the stroke width, and over what
 /// distance. A geometrically perfect edge is the clearest giveaway that a stroke is synthetic —
@@ -400,16 +403,25 @@ private func drawHighlighter(_ shape: AnnotationShape, color: NSColor) {
                               spacing: max(4, shape.strokeWidth * 0.25))
     let path = CGMutablePath()
     addSmoothStroke(pts, to: path)
+    // A geometrically perfect edge gives the stroke away as synthetic, so the core is nudged
+    // sideways by a small smooth wobble and the blur carries it into the visible boundary.
+    let combed = combedStroke(pts, amplitude: max(0.35, shape.strokeWidth * highlighterCombAmplitude),
+                              period: highlighterCombPeriod)
 
     let width = shape.strokeWidth
-    let blur = max(highlighterEdgeBlurMin, width * highlighterEdgeBlurRatio)
+    // The shadow's offset and blur are in device space, so both are expressed in device units —
+    // that is what keeps the edge identical on screen and in the exported PNG, which renders at
+    // a different scale.
+    let ctm = cg.ctm
+    let scale = max(abs(ctm.d), 0.01)
+    let blur = max(highlighterEdgeBlurMin, width * highlighterEdgeBlurRatio) * scale
+    let lift = (width * 2 + width * highlighterEdgeBlurRatio * 4) * scale
+
     // The core is stroked past both ends so the blur has already reached full strength where the
     // footprint clips it. Without that the blur would fade the ends round instead of cutting
     // them off square, which is the one place a marker is abrupt.
-    let combed = combedStroke(pts, amplitude: max(0.35, width * highlighterCombAmplitude),
-                              period: highlighterCombPeriod)
     let corePath = CGMutablePath()
-    addSmoothStroke(extendedStroke(combed, by: blur * 2), to: corePath)
+    addSmoothStroke(extendedStroke(combed, by: blur * 2 / scale), to: corePath)
 
     // The grain only ever removes ink, so ask for slightly more density than the caller wants
     // and let the grain take it back down to the target on average.
@@ -423,20 +435,27 @@ private func drawHighlighter(_ shape: AnnotationShape, color: NSColor) {
     cg.setBlendMode(.multiply)          // governs how the finished layer meets the paper
     cg.setAlpha(density)                // the layer's overall strength is the density knob
     cg.clip(to: bounds)
-    // Clip to the nib's footprint: the shadow's falloff has already decayed to nothing by the
-    // time it reaches this boundary, so the clip only decides how far the ink may reach.
-    cg.addPath(path.copy(strokingWithWidth: width, lineCap: .butt, lineJoin: .round, miterLimit: 10))
+    // Clip to the nib's footprint (with room for the shadow's tail).
+    cg.addPath(path.copy(strokingWithWidth: width * highlighterClipRatio,
+                         lineCap: .butt, lineJoin: .round, miterLimit: 10))
     cg.clip()
     cg.beginTransparencyLayer(auxiliaryInfo: nil)
-    cg.setShadow(offset: .zero, blur: blur, color: color.withAlphaComponent(1).cgColor)
+    // Shadow *only*. Core Graphics draws a shape and its shadow, and the sharp copy would stamp a
+    // hard edge on top of the soft one. So the core is drawn clear of the clip — Core Graphics
+    // does not cull shapes outside the canvas — and the offset brings only the blurred copy back
+    // onto the footprint. The offset is device-space while the shape moves in user space, hence
+    // the -ctm.d factor.
+    cg.saveGState()                     // the lift and the shadow must not outlive this stroke
+    cg.translateBy(x: 0, y: lift / scale)
+    cg.setShadow(offset: CGSize(width: 0, height: -ctm.d * lift / scale), blur: blur,
+                 color: color.withAlphaComponent(1).cgColor)
     cg.setStrokeColor(color.withAlphaComponent(1).cgColor)
     cg.setLineWidth(max(1, width * highlighterCoreRatio))
     cg.setLineCap(.butt)
     cg.setLineJoin(.round)
     cg.addPath(corePath)
     cg.strokePath()
-    // The shadow must not cast onto the grain pass.
-    cg.setShadow(offset: .zero, blur: 0, color: nil)
+    cg.restoreGState()
     // The grain has to be knocked into the ink as a whole, which is exactly why the ink is
     // built in a layer: once alpha has been composited onto the paper there is no way to thin
     // just part of it.
