@@ -23,50 +23,31 @@ private let highlighterAlpha: CGFloat = 0.85
 /// How much wider the wet edge is than the core of the stroke. Real felt-tip ink wicks a
 /// little past the tip's footprint.
 ///
-/// Cross-section density profile of the marker, as (radius, density) pairs. `radius` is a
-/// fraction of the stroke's half-width; `density` is a fraction of `highlighterAlpha`.
-///
-/// A felt tip lays down a plateau in the middle and a smooth falloff near the edge, built from
-/// nested strokes whose densities are solved into per-pass alphas (see `highlighterPassAlphas`).
-/// What limits the quality is the alpha step between passes: a step only disappears when it is
-/// small *and* the passes are close together in space. Because the radii are fractions of the
-/// half-width, a thick stroke spreads the same steps over more pixels — which is exactly why
-/// thick strokes banded while thin ones looked fine, and why the count grows with the width.
-/// The floor matters too: a thin stroke squeezes the whole falloff into a few pixels, so it needs
-/// enough passes that no single step stands out. Even so this is an approximation of a gradient
-/// with discrete strokes — see the note in drawHighlighter about what it cannot fix.
-private func highlighterProfile(for width: CGFloat) -> [(radius: CGFloat, density: CGFloat)] {
-    // Two bounds have to be converged, and they pull in opposite directions:
-    //  - the step between passes grows as `drop / (count - 1)`;
-    //  - the step at the outer edge is the outermost pass's own density, `1 - drop`.
-    // Equalising them gives `count - 1 = drop / (1 - drop)`, i.e. every step the same size.
-    // Eighteen is the floor, and it is deliberately not the equalising 22: measured against the
-    // version with 22 passes, the extra four bought 0.0385 against 0.048 per step — both far below
-    // anything visible — while costing 72% more time (8 strokes: 137 -> 236 ms). The edge cliff is
-    // what the eye actually caught, and that comes from `drop`, not from the pass count. The count
-    // only grows for thick strokes, where the falloff is wide enough that 18 passes sit more than a
-    // pixel apart and each step becomes resolvable again.
-    let count = min(40, max(18, Int(width * 0.30)))
-    let inner: CGFloat = 0.60, outer: CGFloat = 1.03
-    // The drop is set by the outer edge, not by taste: the outermost pass is what the eye reads
-    // as the boundary and its own outline cuts it off square, so its density *is* that step.
-    // 0.735 left a 0.23 alpha cliff, 0.88 halved it to 0.10, and 0.955 brings it to 0.045 —
-    // matched to the step between passes, which is what `count` below is sized against. Going
-    // shallower is worse, not better: it raises the outermost density and hardens the edge
-    // (drop 0.42 measured 0.30).
-    let drop: CGFloat = 0.955
-    return (0..<count).map { i in
-        let t = CGFloat(i) / CGFloat(count - 1)
-        return (radius: inner + (outer - inner) * t, density: 1 - drop * t)
+/// Width of the soft edge, in document pixels, and how far the density-carrying passes stop short
+/// of the ends. Both are *absolute*, not fractions of the nib: ink wicks into paper over a
+/// fibre-scale distance, so a 240 px highlighter should not have a 30 px soft edge. Making them
+/// fixed also pins the pass count — with the falloff always the same width, the same number of
+/// passes always gives the same step size, so nothing has to grow with the nib (the count used to
+/// climb to 40 passes for thick strokes purely to stop the steps resolving).
+private let highlighterEdgeWidth: CGFloat = 3.5
+private let highlighterEndFade: CGFloat = 3.0
+private let highlighterPassCount = 18
+/// The density the outermost pass falls to. That pass's own outline cuts it off square, so its
+/// density *is* the size of the step at the edge; it is kept matched to the step between passes.
+private let highlighterDensityDrop: CGFloat = 0.955
+
+/// Cross-section density profile of the marker as (halfWidth, density) pairs — halfWidths are in
+/// document pixels from the centreline. A felt tip lays down a plateau in the middle and a falloff
+/// of fixed width at the edge; the passes are spaced evenly across that falloff and their densities
+/// solved into per-pass alphas (see `highlighterPassAlphas`).
+private func highlighterProfile(for width: CGFloat) -> [(halfWidth: CGFloat, density: CGFloat)] {
+    let outer = width / 2
+    let inner = max(outer * 0.15, outer - highlighterEdgeWidth)
+    return (0..<highlighterPassCount).map { i in
+        let t = CGFloat(i) / CGFloat(highlighterPassCount - 1)
+        return (halfWidth: inner + (outer - inner) * t, density: 1 - highlighterDensityDrop * t)
     }
 }
-/// How far the *dense* passes stop short of the ends, as a fraction of the half-width. A butt cap
-/// alone leaves the ends razor square while the sides fade out — the one place a marker is not
-/// abrupt. Trimming the passes that carry the density (and letting the wide faint ones run the
-/// full length) makes the ink fade towards the ends over the same sort of distance as the sides,
-/// while the footprint — and so the stroke's extent — stays exactly where the drag ended.
-private let highlighterEndFade: CGFloat = 0.12
-
 /// How far the ink boundary wanders sideways, as a fraction of the stroke width, and over what
 /// distance. A geometrically perfect edge is the clearest giveaway that a stroke is synthetic —
 /// ink follows the paper's fibres, so the boundary should be slightly uneven. The wobble is
@@ -445,7 +426,7 @@ private func renderShape(_ shape: AnnotationShape) {
 /// a single transparency layer, so densities accumulate as `1 - ∏(1 - alphaᵢ)`; solving that
 /// from the outside in gives each pass's alpha in closed form — and guarantees the centre
 /// lands on `peak` exactly rather than approximately.
-private func highlighterPassAlphas(_ profile: [(radius: CGFloat, density: CGFloat)],
+private func highlighterPassAlphas(_ profile: [(halfWidth: CGFloat, density: CGFloat)],
                                    peak: CGFloat) -> [CGFloat] {
     var alphas = [CGFloat](repeating: 0, count: profile.count)
     var outside: CGFloat = 0            // density already laid down further out
@@ -517,7 +498,7 @@ private func drawHighlighter(_ shape: AnnotationShape, color: NSColor) {
     // actually does (the ink stops where the nib lifts). Trimming only the faint passes instead
     // leaves the dense narrow ones sticking out past them as a little spear at each end.
     let faintest = profile[profile.count - 1].density
-    let endFade = shape.strokeWidth / 2 * highlighterEndFade
+    let endFade = highlighterEndFade
     for i in profile.indices.reversed() where alphas[i] > 0.001 {
         // Denser passes stop further short, so the density ramps down over the last `endFade`
         // regardless of which pass is which. Trimming the *faint* passes instead (an earlier
@@ -529,7 +510,7 @@ private func drawHighlighter(_ shape: AnnotationShape, color: NSColor) {
         let bandPath = CGMutablePath()
         addSmoothStroke(bandPts, to: bandPath)
         cg.setStrokeColor(color.withAlphaComponent(alphas[i]).cgColor)
-        cg.setLineWidth(shape.strokeWidth * profile[i].radius)
+        cg.setLineWidth(max(1, profile[i].halfWidth * 2))
         cg.addPath(bandPath)
         cg.strokePath()
     }
