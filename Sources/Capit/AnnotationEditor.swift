@@ -46,7 +46,7 @@ private func highlighterProfile(for width: CGFloat) -> [(radius: CGFloat, densit
     // what the eye actually caught, and that comes from `drop`, not from the pass count. The count
     // only grows for thick strokes, where the falloff is wide enough that 18 passes sit more than a
     // pixel apart and each step becomes resolvable again.
-    let count = min(32, max(18, Int(width * 0.26)))
+    let count = min(40, max(18, Int(width * 0.30)))
     let inner: CGFloat = 0.60, outer: CGFloat = 1.03
     // The drop is set by the outer edge, not by taste: the outermost pass is what the eye reads
     // as the boundary and its own outline cuts it off square, so its density *is* that step.
@@ -65,7 +65,7 @@ private func highlighterProfile(for width: CGFloat) -> [(radius: CGFloat, densit
 /// abrupt. Trimming the passes that carry the density (and letting the wide faint ones run the
 /// full length) makes the ink fade towards the ends over the same sort of distance as the sides,
 /// while the footprint — and so the stroke's extent — stays exactly where the drag ended.
-private let highlighterEndFade: CGFloat = 0.35
+private let highlighterEndFade: CGFloat = 0.12
 
 /// How far the ink boundary wanders sideways, as a fraction of the stroke width, and over what
 /// distance. A geometrically perfect edge is the clearest giveaway that a stroke is synthetic —
