@@ -38,10 +38,11 @@ private let highlighterAlpha: CGFloat = 0.85
 private func highlighterProfile(for width: CGFloat) -> [(radius: CGFloat, density: CGFloat)] {
     let count = min(18, max(12, Int(width / 6)))
     let inner: CGFloat = 0.60, outer: CGFloat = 1.03
-    // The drop has to stay this deep: the outermost pass is what the eye sees as the edge, and
-    // it is cut off square by its own outline, so a shallower drop leaves a fainter edge but a
-    // much harder one (tried: drop 0.42 gave a 0.30 alpha step at sw=16 against 0.15 here).
-    let drop: CGFloat = 0.735
+    // The drop is set by the outer edge, not by taste: the outermost pass is what the eye reads
+    // as the boundary and its own outline cuts it off square, so its density is the size of that
+    // step. 0.735 left a 0.23 alpha cliff; 0.88 halves it to 0.10. Going shallower is worse, not
+    // better — that raises the outermost density and hardens the edge (drop 0.42 gave 0.30).
+    let drop: CGFloat = 0.88
     return (0..<count).map { i in
         let t = CGFloat(i) / CGFloat(count - 1)
         return (radius: inner + (outer - inner) * t, density: 1 - drop * t)
@@ -256,7 +257,12 @@ private func combedStroke(_ pts: [CGPoint], amplitude: CGFloat, period: CGFloat)
         guard len > 0 else { continue }
         // perpendicular to the local tangent
         let nx = -dy / len, ny = dx / len
-        let s = (noise(Double(arc / period)) + noise(Double(arc / period) + 7.3) - 1.0) * Double(amplitude)
+        // Faded to nothing at both ends. The endpoints themselves cannot move, so any wobble on
+        // the last sample tilts the butt cap — and on a wide nib a tilted cap over its full width
+        // is exactly what reads as a pointed or rounded head.
+        let fade = min(1, min(CGFloat(i), CGFloat(pts.count - 1 - i)) / 3)
+        let s = (noise(Double(arc / period)) + noise(Double(arc / period) + 7.3) - 1.0)
+                * Double(amplitude) * Double(fade)
         out[i] = CGPoint(x: pts[i].x + nx * CGFloat(s), y: pts[i].y + ny * CGFloat(s))
     }
     return out
