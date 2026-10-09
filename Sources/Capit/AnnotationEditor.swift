@@ -22,19 +22,40 @@ private let highlighterAlpha: CGFloat = 0.85
 
 /// How much wider the wet edge is than the core of the stroke. Real felt-tip ink wicks a
 /// little past the tip's footprint.
-private let highlighterWetEdgeWidthRatio: CGFloat = 1.28
-/// Density of the wet edge relative to the core. The core's own alpha is then derived so that
-/// edge × core still multiplies to exactly `highlighterAlpha` in the middle (see drawHighlighter).
-private let highlighterWetEdgeRatio: CGFloat = 0.35
+///
+/// Cross-section density profile of the marker, as (radius, density) pairs. `radius` is a
+/// fraction of the stroke's half-width; `density` is a fraction of `highlighterAlpha`.
+///
+/// A felt tip lays down a plateau in the middle and a smooth falloff near the edge. Drawing
+/// that as just two passes (a full-density core plus a wider fringe) produces a hard step from
+/// one density to the other, which reads as two concentric bands — obvious and digital. These
+/// bands are accumulated with source-over and inverted into per-pass alphas, so the cross
+/// section ramps continuously instead.
+private let highlighterProfile: [(radius: CGFloat, density: CGFloat)] = [
+    (0.600, 1.000), (0.730, 0.895), (0.820, 0.790), (0.885, 0.685),
+    (0.935, 0.580), (0.972, 0.475), (1.000, 0.370), (1.030, 0.265)
+]
 /// Peak strength of the paper grain, i.e. how much of the ink the roughest speckle may thin
 /// out (0 = flat ink, 1 = grain can erase the ink completely).
-private let highlighterGrainStrength: CGFloat = 0.42
+///
+/// Capped by the density budget rather than by taste: the grain is applied by removing ink, so
+/// it drags the mean density down by roughly half this value, and the passes that build the
+/// cross-section cannot exceed alpha 1 to compensate. At 0.42 the mean loss (~0.22) exceeded
+/// `highlighterAlpha`'s remaining headroom (0.15), so the profile saturated and the marker
+/// silently plateaued at ~0.78 no matter what the knob said.
+private let highlighterGrainStrength: CGFloat = 0.26
 /// Exponential smoothing applied to the incoming pointer while drawing freehand. Most of the
 /// visible smoothing actually comes from rendering the samples as a Catmull-Rom curve rather
 /// than a polyline: over the same samples, edge jaggedness measures ~7 px as a polyline, ~1.3 px
 /// through the spline, and ~1.0 px through the spline over these smoothed samples. Set to 1 to
 /// disable the filter entirely if the slight trailing lag is unwelcome.
 private let highlighterSmoothing: CGFloat = 0.4
+
+/// How far the faint outer passes stop short of the core, as a fraction of the stroke's
+/// half-width. Without it every pass ends on the same flat butt cut, so the stroke's sides fade
+/// out while its ends stay razor square — an obviously wrong combination. Trimming the wide
+/// passes back makes the ink narrow and thin out towards the ends, the way a lifting nib does.
+private let highlighterEndTaper: CGFloat = 0.35
 
 /// Deterministic RNG so the grain tile is identical on every run — the live canvas, the
 /// exported PNG and the verification harness all see exactly the same texture.
@@ -166,6 +187,82 @@ private func addSmoothStroke(_ pts: [CGPoint], to path: CGMutablePath) {
     }
 }
 
+/// Resamples a polyline to evenly spaced points. The stroker's cost is driven by the number of
+/// curve segments it has to flatten, and each band pass pays that cost again — freehand capture
+/// records a sample every ~3 screen points, which is far denser than a smooth highlight needs
+/// (a long drag reached 2300 segments and made an 11-pass render 5× slower than it had to be).
+/// Spacing is tied to the stroke width, and capped so a very long drag cannot blow the budget.
+private func resampledStroke(_ pts: [CGPoint], spacing: CGFloat) -> [CGPoint] {
+    guard pts.count >= 2 else { return pts }
+    var arc: [CGFloat] = [0]
+    for i in 1..<pts.count {
+        arc.append(arc[i - 1] + hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y))
+    }
+    let total = arc[arc.count - 1]
+    guard total > spacing else { return pts }
+    let step = max(spacing, total / 500)
+    var out: [CGPoint] = [pts[0]]
+    var target = step
+    var seg = 1
+    while target < total && seg < arc.count {
+        while seg < arc.count - 1 && arc[seg] < target { seg += 1 }
+        let len = arc[seg] - arc[seg - 1]
+        let t = len > 0 ? (target - arc[seg - 1]) / len : 0
+        out.append(CGPoint(x: pts[seg - 1].x + (pts[seg].x - pts[seg - 1].x) * t,
+                           y: pts[seg - 1].y + (pts[seg].y - pts[seg - 1].y) * t))
+        target += step
+    }
+    out.append(pts[pts.count - 1])
+    return out
+}
+
+/// Cuts `distance` off both ends of a polyline, interpolating the new endpoints. Returns an
+/// empty array when the stroke is too short to leave anything behind.
+private func trimmedStroke(_ pts: [CGPoint], by distance: CGFloat) -> [CGPoint] {
+    guard distance > 0.01, pts.count >= 2 else { return pts }
+    var arc: [CGFloat] = [0]
+    for i in 1..<pts.count {
+        arc.append(arc[i - 1] + hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y))
+    }
+    let total = arc[arc.count - 1]
+    guard total > 2 * distance else { return [] }
+    func point(at s: CGFloat) -> CGPoint {
+        var i = 1
+        while i < arc.count - 1 && arc[i] < s { i += 1 }
+        let seg = arc[i] - arc[i - 1]
+        let t = seg > 0 ? (s - arc[i - 1]) / seg : 0
+        return CGPoint(x: pts[i - 1].x + (pts[i].x - pts[i - 1].x) * t,
+                       y: pts[i - 1].y + (pts[i].y - pts[i - 1].y) * t)
+    }
+    var out = [point(at: distance)]
+    for i in 1..<(pts.count - 1) where arc[i] > distance && arc[i] < total - distance {
+        out.append(pts[i])
+    }
+    out.append(point(at: total - distance))
+    return out.count >= 2 ? out : []
+}
+
+/// Tiles `image` at its natural pixel size, anchored to the document origin so overlapping
+/// strokes share one sheet of paper.
+///
+/// `CGContext.draw(_:in:byTiling:)` cannot be used here: it scales the image to fill the
+/// rectangle before tiling, and because that rectangle is the stroke's bounding box (long and
+/// thin) it stretched the grain ~4.5× along the stroke, which showed up as horizontal combing
+/// through the ink. Placing the tiles by hand fixes the aspect and keeps the grain square.
+private func drawTiled(_ image: CGImage, in bounds: CGRect, into cg: CGContext) {
+    let side = CGFloat(image.width)
+    guard side > 0 else { return }
+    var y = (bounds.minY / side).rounded(.down) * side
+    while y < bounds.maxY {
+        var x = (bounds.minX / side).rounded(.down) * side
+        while x < bounds.maxX {
+            cg.draw(image, in: CGRect(x: x, y: y, width: side, height: side))
+            x += side
+        }
+        y += side
+    }
+}
+
 /// Auto continuous-corner radius for a rounded rectangle (a fraction of its shorter side).
 private func continuousRadius(for r: CGRect) -> CGFloat {
     max(4, min(r.width, r.height) * 0.2)
@@ -220,18 +317,34 @@ private func renderShape(_ shape: AnnotationShape) {
     }
 }
 
-/// Draws the highlighter as marker ink rather than as a translucent bar: a soft wet edge, a
-/// core stroke, and paper grain thinning the ink unevenly. Every pass multiplies onto the
-/// paper, so dark content underneath stays dark and legible. Both the live canvas and the
-/// export renderer call this, so the saved PNG matches the screen exactly.
-private func drawHighlighter(_ shape: AnnotationShape, color: NSColor) {
-    let pts = shape.strokePoints
+/// Inverts `highlighterProfile` into one alpha per pass. The passes are drawn source-over into
+/// a single transparency layer, so densities accumulate as `1 - ∏(1 - alphaᵢ)`; solving that
+/// from the outside in gives each pass's alpha in closed form — and guarantees the centre
+/// lands on `peak` exactly rather than approximately.
+private func highlighterPassAlphas(_ profile: [(radius: CGFloat, density: CGFloat)],
+                                   peak: CGFloat) -> [CGFloat] {
+    var alphas = [CGFloat](repeating: 0, count: profile.count)
+    var outside: CGFloat = 0            // density already laid down further out
+    for i in stride(from: profile.count - 1, through: 0, by: -1) {
+        let target = min(profile[i].density * peak, 1)
+        alphas[i] = outside >= 1 ? 0 : max(0, 1 - (1 - target) / (1 - outside))
+        outside = max(outside, target)
+    }
+    return alphas
+}
 
+/// Draws the highlighter as marker ink rather than as a translucent bar: a cross-section that
+/// ramps from full density in the middle to nothing at the edge, with paper grain thinning the
+/// ink unevenly. One multiply composite onto the paper, so dark content underneath stays dark
+/// and legible. Both the live canvas and the export renderer call this, so the saved PNG
+/// matches the screen exactly.
+private func drawHighlighter(_ shape: AnnotationShape, color: NSColor) {
     guard let cg = NSGraphicsContext.current?.cgContext else {
         // No CG context (not expected): fall back to a plain polyline stroke.
+        let fallback = shape.strokePoints
         let path = NSBezierPath()
-        path.move(to: pts[0])
-        for p in pts.dropFirst() { path.line(to: p) }
+        path.move(to: fallback[0])
+        for p in fallback.dropFirst() { path.line(to: p) }
         path.lineWidth = shape.strokeWidth
         path.lineCapStyle = .butt
         path.lineJoinStyle = .round
@@ -240,50 +353,50 @@ private func drawHighlighter(_ shape: AnnotationShape, color: NSColor) {
         return
     }
 
-    let path = CGMutablePath()
-    addSmoothStroke(pts, to: path)
+    let pts = resampledStroke(shape.strokePoints, spacing: max(4, shape.strokeWidth * 0.25))
 
-    // Split the density across the two passes so the core still lands on the intended alpha
-    // once both have multiplied: edge × core = 1-(1-edge)(1-core) = a.
-    let a = color.alphaComponent
-    let edgeAlpha = a * highlighterWetEdgeRatio
-    let thinned = 1 - (1 - a) / (1 - edgeAlpha)
-    // The grain only removes ink, so draw the core denser by the average amount the grain
-    // will take away — otherwise a textured stroke would read weaker than a flat one.
+    // The grain only ever removes ink, so aim the profile correspondingly higher — otherwise a
+    // textured stroke would read lighter than the same stroke without grain.
     let grainMean = highlighterGrain?.meanAlpha ?? 0
-    let coreAlpha = min(thinned / max(1 - grainMean, 0.01), 1)
+    let peak = min(color.alphaComponent / max(1 - grainMean, 0.01), 1)
+    let alphas = highlighterPassAlphas(highlighterProfile, peak: peak)
+    let halfWidth = shape.strokeWidth / 2
+    let faintest = highlighterProfile[highlighterProfile.count - 1].density
+
+    // Bounds the transparency layer's buffer (and the tiled grain draw) to the stroke.
+    let bounds = shape.rect.insetBy(dx: -shape.strokeWidth, dy: -shape.strokeWidth)
 
     cg.saveGState()
-    cg.setBlendMode(.multiply)
+    cg.setBlendMode(.multiply)          // governs how the finished layer meets the paper
+    cg.clip(to: bounds)
+    cg.beginTransparencyLayer(auxiliaryInfo: nil)
+    cg.setBlendMode(.normal)            // inside, the passes must accumulate, not multiply
     cg.setLineCap(.butt)
     cg.setLineJoin(.round)
-
-    // 1. Wet edge: a wider, fainter pass. Because both passes multiply, the fringe comes out
-    //    lighter than the core — which is how a felt tip actually deposits ink.
-    cg.setStrokeColor(color.withAlphaComponent(edgeAlpha).cgColor)
-    cg.setLineWidth(shape.strokeWidth * highlighterWetEdgeWidthRatio)
-    cg.addPath(path)
-    cg.strokePath()
-
-    // 2. Core, with the paper grain knocked into it. The grain is applied inside a
-    //    transparency layer so it can thin the ink per pixel; without the layer there would
-    //    be no way to un-bake alpha that has already been composited onto the paper. The
-    //    layer is bounded by a rectangular clip so it stays cheap to allocate.
-    let grainRect = shape.rect.insetBy(dx: -shape.strokeWidth, dy: -shape.strokeWidth)
-    cg.saveGState()
-    cg.clip(to: grainRect)
-    cg.beginTransparencyLayer(auxiliaryInfo: nil)
-    cg.setStrokeColor(color.withAlphaComponent(coreAlpha).cgColor)
-    cg.setLineWidth(shape.strokeWidth)
-    cg.addPath(path)
-    cg.strokePath()
+    cg.setLineCap(.butt)
+    cg.setLineJoin(.round)
+    // Widest (and faintest) first, narrowing to the full-density core.
+    for i in highlighterProfile.indices.reversed() where alphas[i] > 0.001 {
+        let band = highlighterProfile[i]
+        // Fainter passes stop further short of the ends, so the ink thins out towards them.
+        let taper = highlighterEndTaper * halfWidth * (1 - band.density) / (1 - faintest)
+        let bandPts = taper > 0.01 ? trimmedStroke(pts, by: taper) : pts
+        guard bandPts.count >= 2 else { continue }
+        let bandPath = CGMutablePath()
+        addSmoothStroke(bandPts, to: bandPath)
+        cg.setStrokeColor(color.withAlphaComponent(alphas[i]).cgColor)
+        cg.setLineWidth(shape.strokeWidth * band.radius)
+        cg.addPath(bandPath)
+        cg.strokePath()
+    }
+    // The grain has to be knocked into the ink as a whole, which is exactly why the ink is
+    // built in a layer: once alpha has been composited onto the paper there is no way to thin
+    // just part of it.
     if let grain = highlighterGrain {
         cg.setBlendMode(.destinationOut)
-        cg.draw(grain.image, in: grainRect, byTiling: true)
+        drawTiled(grain.image, in: bounds, into: cg)
     }
     cg.endTransparencyLayer()
-    cg.restoreGState()
-
     cg.restoreGState()
 }
 
@@ -1252,13 +1365,13 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
 
     /// Appends a sampled point to a freehand highlighter stroke (⌥-started strokes only).
-    /// Samples are spaced about 1.5 *screen* points apart (so density follows the zoom level),
+    /// Samples are spaced about 3 *screen* points apart (so density follows the zoom level),
     /// low-passed so pointer jitter reads as a marker stroke, and an over-long path is
     /// decimated rather than truncated so the stroke is never lost.
     private func appendHighlighterPoint(_ p: CGPoint, to shape: inout AnnotationShape) {
         guard let last = shape.points.last else { return }
         let zoom = max(enclosingScrollView?.magnification ?? 1, 0.01)
-        if hypot(p.x - last.x, p.y - last.y) < 1.5 / zoom { return }
+        if hypot(p.x - last.x, p.y - last.y) < 3.0 / zoom { return }
         let k = highlighterSmoothing
         let smoothed = CGPoint(x: last.x + (p.x - last.x) * k, y: last.y + (p.y - last.y) * k)
         if shape.points.count >= Self.highlighterMaxPoints {
