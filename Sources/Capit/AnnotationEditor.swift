@@ -1288,27 +1288,45 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         window?.invalidateCursorRects(for: self)
     }
 
+    /// The highlighter's caret doubles as a ruler for the nib: its top and bottom edges *are* the
+    /// stroke's edges, so the caret's height equals the stroke width and the nib can be judged from
+    /// it. `halo` is drawn outside those edges for contrast and deliberately does not count towards
+    /// the height — the caps are inset from the edges rather than grown outwards from the stem.
     private static func highlighterCaret(width: CGFloat) -> NSCursor {
         if let c = caretCache[width] { return c }
-        let span = max(6, width)
-        let stemW: CGFloat = 2
-        let capL: CGFloat = 5
+        let stroke = max(6, width)
         let halo: CGFloat = 1
-        let W = capL + halo * 2 + 6
-        let H = span + (2 + halo * 2)
-        let midX = W / 2
+        let stemW: CGFloat = 2
+        let capW: CGFloat = 5
+        let capH: CGFloat = 2
+        // NSImage rounds its backing store up to a multiple of 4 points and scales the drawing into
+        // it, which stretched the caret ~3% for a thick nib and ~11% for a thin one — precisely the
+        // inaccuracy that matters when the caret is meant to measure the nib. So the size is
+        // pre-rounded and the stroke is then placed to fill it exactly.
+        func roundUp4(_ v: CGFloat) -> CGFloat { (v / 4).rounded(.up) * 4 }
+        let W = roundUp4(capW + halo * 2 + 6)
+        let H = roundUp4(stroke + halo * 2)
+        let low = ((H - stroke) / 2).rounded()
+        let high = low + stroke
+        let midX = (W / 2).rounded()
         let img = NSImage(size: NSSize(width: W, height: H))
         img.lockFocus()
         NSColor.clear.set()
         NSRect(origin: .zero, size: img.size).fill()
-        func paint(_ stem: CGFloat, _ cap: CGFloat, _ color: NSColor) {
+        /// `grow` expands the mark outwards by that much, so the white pass frames the black one.
+        func paint(_ grow: CGFloat, _ color: NSColor) {
             color.setFill()
-            NSBezierPath(rect: NSRect(x: midX - stem / 2, y: halo + 1, width: stem, height: H - (halo + 1) * 2)).fill()
-            NSBezierPath(rect: NSRect(x: midX - cap / 2, y: halo, width: cap, height: 2)).fill()
-            NSBezierPath(rect: NSRect(x: midX - cap / 2, y: H - halo - 2, width: cap, height: 2)).fill()
+            NSBezierPath(rect: NSRect(x: midX - (stemW + grow * 2) / 2, y: low - grow,
+                                      width: stemW + grow * 2, height: stroke + grow * 2)).fill()
+            // Caps sit inside the stroke's edges, so their outer edge is exactly the edge: the span
+            // between them is the nib width, which is what the caret is for.
+            for base in [low - grow, high - capH + grow] {
+                NSBezierPath(rect: NSRect(x: midX - (capW + grow * 2) / 2, y: base,
+                                          width: capW + grow * 2, height: capH + grow * 2)).fill()
+            }
         }
-        paint(stemW + halo * 2, capL + halo * 2, NSColor.white)
-        paint(stemW, capL, NSColor.black)
+        paint(halo, .white)
+        paint(0, .black)
         img.unlockFocus()
         let cursor = NSCursor(image: img, hotSpot: NSPoint(x: midX, y: H / 2))
         caretCache[width] = cursor
