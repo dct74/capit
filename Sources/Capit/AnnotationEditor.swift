@@ -46,7 +46,7 @@ private func highlighterProfile(for width: CGFloat) -> [(radius: CGFloat, densit
     // what the eye actually caught, and that comes from `drop`, not from the pass count. The count
     // only grows for thick strokes, where the falloff is wide enough that 18 passes sit more than a
     // pixel apart and each step becomes resolvable again.
-    let count = min(24, max(18, Int(width * 0.2)))
+    let count = min(32, max(18, Int(width * 0.26)))
     let inner: CGFloat = 0.60, outer: CGFloat = 1.03
     // The drop is set by the outer edge, not by taste: the outermost pass is what the eye reads
     // as the boundary and its own outline cuts it off square, so its density *is* that step.
@@ -60,6 +60,13 @@ private func highlighterProfile(for width: CGFloat) -> [(radius: CGFloat, densit
         return (radius: inner + (outer - inner) * t, density: 1 - drop * t)
     }
 }
+/// How far the *dense* passes stop short of the ends, as a fraction of the half-width. A butt cap
+/// alone leaves the ends razor square while the sides fade out — the one place a marker is not
+/// abrupt. Trimming the passes that carry the density (and letting the wide faint ones run the
+/// full length) makes the ink fade towards the ends over the same sort of distance as the sides,
+/// while the footprint — and so the stroke's extent — stays exactly where the drag ended.
+private let highlighterEndFade: CGFloat = 0.35
+
 /// How far the ink boundary wanders sideways, as a fraction of the stroke width, and over what
 /// distance. A geometrically perfect edge is the clearest giveaway that a stroke is synthetic —
 /// ink follows the paper's fibres, so the boundary should be slightly uneven. The wobble is
@@ -240,6 +247,32 @@ private func resampledStroke(_ pts: [CGPoint], spacing: CGFloat) -> [CGPoint] {
     }
     out.append(pts[pts.count - 1])
     return out
+}
+
+/// Cuts `distance` off both ends of a polyline, interpolating the new endpoints. Returns an
+/// empty array when the stroke is too short to leave anything behind.
+private func trimmedStroke(_ pts: [CGPoint], by distance: CGFloat) -> [CGPoint] {
+    guard distance > 0.01, pts.count >= 2 else { return pts }
+    var arc: [CGFloat] = [0]
+    for i in 1..<pts.count {
+        arc.append(arc[i - 1] + hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y))
+    }
+    let total = arc[arc.count - 1]
+    guard total > 2 * distance else { return [] }
+    func point(at s: CGFloat) -> CGPoint {
+        var i = 1
+        while i < arc.count - 1 && arc[i] < s { i += 1 }
+        let seg = arc[i] - arc[i - 1]
+        let t = seg > 0 ? (s - arc[i - 1]) / seg : 0
+        return CGPoint(x: pts[i - 1].x + (pts[i].x - pts[i - 1].x) * t,
+                       y: pts[i - 1].y + (pts[i].y - pts[i - 1].y) * t)
+    }
+    var out = [point(at: distance)]
+    for i in 1..<(pts.count - 1) where arc[i] > distance && arc[i] < total - distance {
+        out.append(pts[i])
+    }
+    out.append(point(at: total - distance))
+    return out.count >= 2 ? out : []
 }
 
 /// Nudges each sample sideways by a small, smooth pseudo-random amount so the ink boundary is
@@ -455,10 +488,21 @@ private func drawHighlighter(_ shape: AnnotationShape, color: NSColor) {
     // share one path: every pass ends on the same butt cut, which is what a swipe of a felt tip
     // actually does (the ink stops where the nib lifts). Trimming only the faint passes instead
     // leaves the dense narrow ones sticking out past them as a little spear at each end.
+    let faintest = profile[profile.count - 1].density
+    let endFade = shape.strokeWidth / 2 * highlighterEndFade
     for i in profile.indices.reversed() where alphas[i] > 0.001 {
+        // Denser passes stop further short, so the density ramps down over the last `endFade`
+        // regardless of which pass is which. Trimming the *faint* passes instead (an earlier
+        // attempt) does the opposite: it leaves the dense narrow ones sticking out as a spear.
+        let density = profile[i].density
+        let trim = endFade * (density - faintest) / max(1 - faintest, 0.01)
+        let bandPts = trim > 0.01 ? trimmedStroke(combed, by: trim) : combed
+        guard bandPts.count >= 2 else { continue }
+        let bandPath = CGMutablePath()
+        addSmoothStroke(bandPts, to: bandPath)
         cg.setStrokeColor(color.withAlphaComponent(alphas[i]).cgColor)
         cg.setLineWidth(shape.strokeWidth * profile[i].radius)
-        cg.addPath(path)
+        cg.addPath(bandPath)
         cg.strokePath()
     }
     // The grain has to be knocked into the ink as a whole, which is exactly why the ink is
