@@ -237,7 +237,20 @@ private func resampledStroke(_ pts: [CGPoint], spacing: CGFloat) -> [CGPoint] {
                            y: pts[seg - 1].y + (pts[seg].y - pts[seg - 1].y) * t))
         target += step
     }
-    out.append(pts[pts.count - 1])
+    // The endpoint is exact, but appending it unconditionally can leave a final segment a fraction
+    // of a step long. That matters: a very short final segment turns any sideways displacement of
+    // the previous sample into a large *angle*, and a butt cap rotated by a large angle sticks out
+    // by up to half the nib along the path. Replacing the previous sample keeps the endpoint exact
+    // and the final segment at least half a step long.
+    let endpoint = pts[pts.count - 1]
+    if let lastEmitted = out.last {
+        let gap = hypot(endpoint.x - lastEmitted.x, endpoint.y - lastEmitted.y)
+        if gap > 0.01 {
+            if gap < step * 0.5, out.count >= 2 { out[out.count - 1] = endpoint } else { out.append(endpoint) }
+        }
+    } else {
+        out.append(endpoint)
+    }
     return out
 }
 
@@ -272,6 +285,15 @@ private func trimmedStroke(_ pts: [CGPoint], by distance: CGFloat) -> [CGPoint] 
 /// randomness), so the live canvas and the export agree exactly.
 private func combedStroke(_ pts: [CGPoint], amplitude: CGFloat, period: CGFloat) -> [CGPoint] {
     guard amplitude > 0.01, pts.count >= 3 else { return pts }
+    // The wobble has to be sampled smoothly, and its slope bounded. At a period of 10 px against a
+    // sample spacing of 30 px the "wobble" is aliased into an unrelated offset per sample — a jagged
+    // displacement rather than an undulation — and a displacement of 2.4 px over a short segment
+    // rotates that segment enough to swing the butt cap. Both the period and the amplitude are
+    // therefore tied to the local spacing.
+    var spacing = CGFloat.greatestFiniteMagnitude
+    for i in 1..<pts.count { spacing = min(spacing, hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y)) }
+    let period = max(period, spacing * 4)
+    let amplitude = min(amplitude, spacing * 0.12)
     // smooth 1-D value noise from a cheap integer hash
     func noise(_ t: Double) -> Double {
         let i = Int(t.rounded(.down)), f = t - Double(i)
@@ -297,7 +319,7 @@ private func combedStroke(_ pts: [CGPoint], amplitude: CGFloat, period: CGFloat)
         // Faded to nothing at both ends. The endpoints themselves cannot move, so any wobble on
         // the last sample tilts the butt cap — and on a wide nib a tilted cap over its full width
         // is exactly what reads as a pointed or rounded head.
-        let fade = min(1, min(CGFloat(i), CGFloat(pts.count - 1 - i)) / 3)
+        let fade = min(1, min(CGFloat(i), CGFloat(pts.count - 1 - i)) / 6)
         let s = (noise(Double(arc / period)) + noise(Double(arc / period) + 7.3) - 1.0)
                 * Double(amplitude) * Double(fade)
         out[i] = CGPoint(x: pts[i].x + nx * CGFloat(s), y: pts[i].y + ny * CGFloat(s))
@@ -338,6 +360,21 @@ private func prunedTail(_ pts: [CGPoint], tolerance: CGFloat) -> [CGPoint] {
     let extend = max(0, reach - progress[cut - 1])
     var out = Array(pts[0..<cut])
     out.append(CGPoint(x: anchor.x + unit.x * extend, y: anchor.y + unit.y * extend))
+    // Cap alignment: walk the end back until the last segment runs along the direction of travel.
+    // A butt cap is perpendicular to its segment, so a segment pointing sideways rotates the cap
+    // by up to 90 degrees — and a rotated butt cap of width 2 x halfWidth reaches half the nib
+    // *along* the path. That is the blob that appears at the end of a dwell. Removing the samples
+    // before the endpoint shifts nothing: the stroke still ends on the reach.
+    var end = out.count - 1
+    while end >= 2, out.count >= 3 {
+        let a = out[end - 1], b = out[end]
+        let len = hypot(b.x - a.x, b.y - a.y)
+        if len < 0.001 { out.remove(at: end - 1); end -= 1; continue }
+        let alignment = ((b.x - a.x) / len) * unit.x + ((b.y - a.y) / len) * unit.y
+        if alignment > 0.87 { break }              // within ~30 degrees of the heading
+        out.remove(at: end - 1)
+        end -= 1
+    }
     return out.count >= 2 ? out : pts
 }
 
@@ -484,15 +521,14 @@ private func drawHighlighter(_ shape: AnnotationShape, color: NSColor) {
     cg.beginTransparencyLayer(auxiliaryInfo: nil)
     cg.setBlendMode(.normal)            // inside, the passes must accumulate, not multiply
     cg.setLineCap(.butt)
-    // .miter, not .round: a round join fills a disc of the full half-width at every vertex, so the
-    // vertex before the end of the stroke protrudes half a nib-width *along* the path. On a 120 px
-    // nib that is a 60 px blob past the end, and the more the path bends (the comb, or a dwell at
-    // the end) the more of those discs there are — which is the "round head". A miter join only
-    // ever extends sideways, which stays inside the stroke's own width, and for the near-straight
-    // bends of a normal stroke it measures the same as a round join. The limit keeps genuine sharp
-    // turns from spiking.
-    cg.setMiterLimit(4)
-    cg.setLineJoin(.miter)
+    // .bevel, deliberately. At a vertex the two other joins each add material beyond the union of
+    // the two segments, and on a wide nib that material is what shows up as a blob at the end of a
+    // stroke: .round fills a disc of the full half-width, and .miter spikes out by up to
+    // half-width / sin(θ/2) — nearly a full nib at a right-angled corner, which the end of a dwell
+    // produces when the wandering samples meet the run to the endpoint. Bevel adds nothing: it cuts
+    // the corner flat between the two segments. For the near-straight bends of a normal stroke all
+    // three are identical, so this only shows up where it was causing damage.
+    cg.setLineJoin(.bevel)
     // Widest (and faintest) pass first, narrowing down to the full-density core. All passes
     // share one path: every pass ends on the same butt cut, which is what a swipe of a felt tip
     // actually does (the ink stops where the nib lifts). Trimming only the faint passes instead
