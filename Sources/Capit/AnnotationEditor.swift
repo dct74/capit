@@ -20,21 +20,28 @@ private let highlighterAlpha: CGFloat = 0.85
 
 // MARK: - Highlighter marker tuning
 
-/// How much wider the wet edge is than the core of the stroke. Real felt-tip ink wicks a
-/// little past the tip's footprint.
+/// The marker's edge is a real blur, produced by stroking the core and letting Core Graphics
+/// blur its shadow to fill the nib footprint (see drawHighlighter). `coreRatio` is the fraction
+/// of the stroke width drawn at full density; the rest is the wet edge the blur grows into.
 ///
-/// Cross-section density profile of the marker, as (radius, density) pairs. `radius` is a
-/// fraction of the stroke's half-width; `density` is a fraction of `highlighterAlpha`.
-///
-/// A felt tip lays down a plateau in the middle and a smooth falloff near the edge. Drawing
-/// that as just two passes (a full-density core plus a wider fringe) produces a hard step from
-/// one density to the other, which reads as two concentric bands — obvious and digital. These
-/// bands are accumulated with source-over and inverted into per-pass alphas, so the cross
-/// section ramps continuously instead.
-private let highlighterProfile: [(radius: CGFloat, density: CGFloat)] = [
-    (0.600, 1.000), (0.730, 0.895), (0.820, 0.790), (0.885, 0.685),
-    (0.935, 0.580), (0.972, 0.475), (1.000, 0.370), (1.030, 0.265)
-]
+/// This replaced eight nested strokes of decreasing width, which approximated the falloff as a
+/// staircase: at 8 steps the alpha jumped 0.105 between bands, and because the bands were
+/// fractions of the half-width those steps spread further apart the thicker the stroke got —
+/// so thick strokes showed visible concentric bands again. A blurred shadow makes the falloff
+/// continuous and identical at every width, and costs one pass instead of eight.
+private let highlighterCoreRatio: CGFloat = 0.62
+/// Blur radius as a fraction of the stroke width, with an absolute floor: ink wicks over a
+/// fibre-scale distance, not a proportional one, so thin strokes still need a soft edge.
+private let highlighterEdgeBlurRatio: CGFloat = 0.32
+private let highlighterEdgeBlurMin: CGFloat = 2.0
+
+/// How far the ink boundary wanders sideways, as a fraction of the stroke width, and over what
+/// distance. A geometrically perfect edge is the clearest giveaway that a stroke is synthetic —
+/// ink follows the paper's fibres, so the boundary should be slightly uneven. The wobble is
+/// low-frequency (period ~10 px) so it reads as wicking rather than as raggedness.
+private let highlighterCombAmplitude: CGFloat = 0.02
+private let highlighterCombPeriod: CGFloat = 10
+
 /// Peak strength of the paper grain, i.e. how much of the ink the roughest speckle may thin
 /// out (0 = flat ink, 1 = grain can erase the ink completely).
 ///
@@ -210,6 +217,89 @@ private func resampledStroke(_ pts: [CGPoint], spacing: CGFloat) -> [CGPoint] {
     return out
 }
 
+/// Drops a stalled run of samples from the end of a freehand path, keeping the point that got
+/// furthest instead of the last sample. When the pointer pauses the samples bunch up and wander
+/// inside a few pixels; stroking that tangle with a wide nib sweeps a round blob out past where
+/// the drag really ended. Detail that small is far below the nib's width, so the stalled samples
+/// carry no information — but the *reach* does, which is why the furthest point is kept.
+private func prunedTail(_ pts: [CGPoint], tolerance: CGFloat) -> [CGPoint] {
+    guard pts.count >= 4, tolerance > 0.01 else { return pts }
+    let last = pts[pts.count - 1]
+    var cut = pts.count - 1
+    while cut > 1, hypot(pts[cut - 1].x - last.x, pts[cut - 1].y - last.y) < tolerance { cut -= 1 }
+    guard cut < pts.count - 1 else { return pts }          // nothing stalled
+    // Where the drag actually reached: the furthest sample of the stalled run.
+    let start = pts[0]
+    var reach = pts[pts.count - 1]
+    var bestDistance = -1.0
+    for i in cut..<pts.count {
+        let d = hypot(pts[i].x - start.x, pts[i].y - start.y)
+        if d > bestDistance { bestDistance = d; reach = pts[i] }
+    }
+    // Keep the path up to the stall, then run straight to the reach. The tangled samples in
+    // between are dropped rather than kept: stroking them would round-join half a nib-width out
+    // past the reach, which is exactly the blob being removed.
+    var out = Array(pts[0..<cut])
+    out.append(reach)
+    return out.count >= 2 ? out : pts
+}
+
+/// Prunes both ends: a pause at the start bunches samples the same way.
+private func prunedEnds(_ pts: [CGPoint], tolerance: CGFloat) -> [CGPoint] {
+    let tail = prunedTail(pts, tolerance: tolerance)
+    return prunedTail(tail.reversed(), tolerance: tolerance).reversed()
+}
+
+/// Nudges each sample sideways by a small, smooth pseudo-random amount so the ink boundary is
+/// slightly uneven instead of a perfect offset curve. Deterministic (an integer hash, not
+/// randomness), so the live canvas and the export agree exactly.
+private func combedStroke(_ pts: [CGPoint], amplitude: CGFloat, period: CGFloat) -> [CGPoint] {
+    guard amplitude > 0.01, pts.count >= 3 else { return pts }
+    // smooth 1-D value noise from a cheap integer hash
+    func noise(_ t: Double) -> Double {
+        let i = Int(t.rounded(.down)), f = t - Double(i)
+        func hash(_ n: Int) -> Double {
+            var h = UInt64(bitPattern: Int64(n)) &* 0x9E37_79B9_7F4A_7C15
+            h = (h ^ (h >> 30)) &* 0xBF58_476D_1CE4_E5B9
+            h ^= h >> 27
+            return Double(h & 0xFFFF) / 65535.0
+        }
+        let a = hash(i), b = hash(i + 1)
+        let u = f * f * (3 - 2 * f)
+        return a + (b - a) * u
+    }
+    var out = pts
+    var arc: CGFloat = 0
+    for i in 1..<(pts.count - 1) {
+        arc += hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y)
+        let dx = pts[i + 1].x - pts[i - 1].x, dy = pts[i + 1].y - pts[i - 1].y
+        let len = hypot(dx, dy)
+        guard len > 0 else { continue }
+        // perpendicular to the local tangent
+        let nx = -dy / len, ny = dx / len
+        let s = (noise(Double(arc / period)) + noise(Double(arc / period) + 7.3) - 1.0) * Double(amplitude)
+        out[i] = CGPoint(x: pts[i].x + nx * CGFloat(s), y: pts[i].y + ny * CGFloat(s))
+    }
+    return out
+}
+
+/// Extends a polyline by `pad` past both ends along its end tangents.
+private func extendedStroke(_ pts: [CGPoint], by pad: CGFloat) -> [CGPoint] {
+    guard pad > 0.01, pts.count >= 2 else { return pts }
+    func unit(_ from: CGPoint, _ to: CGPoint) -> CGPoint {
+        let dx = to.x - from.x, dy = to.y - from.y
+        let len = hypot(dx, dy)
+        return len > 0 ? CGPoint(x: dx / len, y: dy / len) : .zero
+    }
+    let head = pts[0], next = pts[1]
+    let tail = pts[pts.count - 1], prev = pts[pts.count - 2]
+    let hd = unit(next, head), td = unit(prev, tail)
+    var out = [CGPoint(x: head.x + hd.x * pad, y: head.y + hd.y * pad)]
+    out += pts
+    out.append(CGPoint(x: tail.x + td.x * pad, y: tail.y + td.y * pad))
+    return out
+}
+
 /// Tiles `image` at its natural pixel size, anchored to the document origin so overlapping
 /// strokes share one sheet of paper.
 ///
@@ -285,27 +375,11 @@ private func renderShape(_ shape: AnnotationShape) {
     }
 }
 
-/// Inverts `highlighterProfile` into one alpha per pass. The passes are drawn source-over into
-/// a single transparency layer, so densities accumulate as `1 - ∏(1 - alphaᵢ)`; solving that
-/// from the outside in gives each pass's alpha in closed form — and guarantees the centre
-/// lands on `peak` exactly rather than approximately.
-private func highlighterPassAlphas(_ profile: [(radius: CGFloat, density: CGFloat)],
-                                   peak: CGFloat) -> [CGFloat] {
-    var alphas = [CGFloat](repeating: 0, count: profile.count)
-    var outside: CGFloat = 0            // density already laid down further out
-    for i in stride(from: profile.count - 1, through: 0, by: -1) {
-        let target = min(profile[i].density * peak, 1)
-        alphas[i] = outside >= 1 ? 0 : max(0, 1 - (1 - target) / (1 - outside))
-        outside = max(outside, target)
-    }
-    return alphas
-}
-
-/// Draws the highlighter as marker ink rather than as a translucent bar: a cross-section that
-/// ramps from full density in the middle to nothing at the edge, with paper grain thinning the
-/// ink unevenly. One multiply composite onto the paper, so dark content underneath stays dark
-/// and legible. Both the live canvas and the export renderer call this, so the saved PNG
-/// matches the screen exactly.
+/// Draws the highlighter as marker ink rather than as a translucent bar: a core at full
+/// density whose blurred shadow supplies a continuous wet edge inside the nib's footprint, with
+/// paper grain thinning the ink unevenly. One multiply composite onto the paper, so dark content
+/// underneath stays dark and legible. Both the live canvas and the export renderer call this, so
+/// the saved PNG matches the screen exactly.
 private func drawHighlighter(_ shape: AnnotationShape, color: NSColor) {
     guard let cg = NSGraphicsContext.current?.cgContext else {
         // No CG context (not expected): fall back to a plain polyline stroke.
@@ -321,36 +395,48 @@ private func drawHighlighter(_ shape: AnnotationShape, color: NSColor) {
         return
     }
 
-    let pts = resampledStroke(shape.strokePoints, spacing: max(4, shape.strokeWidth * 0.25))
-
-    // The grain only ever removes ink, so aim the profile correspondingly higher — otherwise a
-    // textured stroke would read lighter than the same stroke without grain.
-    let grainMean = highlighterGrain?.meanAlpha ?? 0
-    let peak = min(color.alphaComponent / max(1 - grainMean, 0.01), 1)
-    let alphas = highlighterPassAlphas(highlighterProfile, peak: peak)
+    let stalled = max(1, shape.strokeWidth * 0.35)
+    let pts = resampledStroke(prunedEnds(shape.strokePoints, tolerance: stalled),
+                              spacing: max(4, shape.strokeWidth * 0.25))
     let path = CGMutablePath()
     addSmoothStroke(pts, to: path)
 
+    let width = shape.strokeWidth
+    let blur = max(highlighterEdgeBlurMin, width * highlighterEdgeBlurRatio)
+    // The core is stroked past both ends so the blur has already reached full strength where the
+    // footprint clips it. Without that the blur would fade the ends round instead of cutting
+    // them off square, which is the one place a marker is abrupt.
+    let combed = combedStroke(pts, amplitude: max(0.35, width * highlighterCombAmplitude),
+                              period: highlighterCombPeriod)
+    let corePath = CGMutablePath()
+    addSmoothStroke(extendedStroke(combed, by: blur * 2), to: corePath)
+
+    // The grain only ever removes ink, so ask for slightly more density than the caller wants
+    // and let the grain take it back down to the target on average.
+    let grainMean = highlighterGrain?.meanAlpha ?? 0
+    let density = min(color.alphaComponent / max(1 - grainMean, 0.01), 1)
+
     // Bounds the transparency layer's buffer (and the tiled grain draw) to the stroke.
-    let bounds = shape.rect.insetBy(dx: -shape.strokeWidth, dy: -shape.strokeWidth)
+    let bounds = shape.rect.insetBy(dx: -width, dy: -width)
 
     cg.saveGState()
     cg.setBlendMode(.multiply)          // governs how the finished layer meets the paper
+    cg.setAlpha(density)                // the layer's overall strength is the density knob
     cg.clip(to: bounds)
+    // Clip to the nib's footprint: the shadow's falloff has already decayed to nothing by the
+    // time it reaches this boundary, so the clip only decides how far the ink may reach.
+    cg.addPath(path.copy(strokingWithWidth: width, lineCap: .butt, lineJoin: .round, miterLimit: 10))
+    cg.clip()
     cg.beginTransparencyLayer(auxiliaryInfo: nil)
-    cg.setBlendMode(.normal)            // inside, the passes must accumulate, not multiply
+    cg.setShadow(offset: .zero, blur: blur, color: color.withAlphaComponent(1).cgColor)
+    cg.setStrokeColor(color.withAlphaComponent(1).cgColor)
+    cg.setLineWidth(max(1, width * highlighterCoreRatio))
     cg.setLineCap(.butt)
     cg.setLineJoin(.round)
-    // Widest (and faintest) pass first, narrowing down to the full-density core. All passes
-    // share one path: every pass ends on the same butt cut, which is what a swipe of a felt tip
-    // actually does (the ink stops where the nib lifts). Trimming only the faint passes instead
-    // leaves the dense narrow ones sticking out past them as a little spear at each end.
-    for i in highlighterProfile.indices.reversed() where alphas[i] > 0.001 {
-        cg.setStrokeColor(color.withAlphaComponent(alphas[i]).cgColor)
-        cg.setLineWidth(shape.strokeWidth * highlighterProfile[i].radius)
-        cg.addPath(path)
-        cg.strokePath()
-    }
+    cg.addPath(corePath)
+    cg.strokePath()
+    // The shadow must not cast onto the grain pass.
+    cg.setShadow(offset: .zero, blur: 0, color: nil)
     // The grain has to be knocked into the ink as a whole, which is exactly why the ink is
     // built in a layer: once alpha has been composited onto the paper there is no way to thin
     // just part of it.
