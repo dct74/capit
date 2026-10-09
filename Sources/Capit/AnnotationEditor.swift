@@ -51,12 +51,6 @@ private let highlighterGrainStrength: CGFloat = 0.26
 /// disable the filter entirely if the slight trailing lag is unwelcome.
 private let highlighterSmoothing: CGFloat = 0.4
 
-/// How far the faint outer passes stop short of the core, as a fraction of the stroke's
-/// half-width. Without it every pass ends on the same flat butt cut, so the stroke's sides fade
-/// out while its ends stay razor square — an obviously wrong combination. Trimming the wide
-/// passes back makes the ink narrow and thin out towards the ends, the way a lifting nib does.
-private let highlighterEndTaper: CGFloat = 0.35
-
 /// Deterministic RNG so the grain tile is identical on every run — the live canvas, the
 /// exported PNG and the verification harness all see exactly the same texture.
 private struct SplitMix64 {
@@ -216,32 +210,6 @@ private func resampledStroke(_ pts: [CGPoint], spacing: CGFloat) -> [CGPoint] {
     return out
 }
 
-/// Cuts `distance` off both ends of a polyline, interpolating the new endpoints. Returns an
-/// empty array when the stroke is too short to leave anything behind.
-private func trimmedStroke(_ pts: [CGPoint], by distance: CGFloat) -> [CGPoint] {
-    guard distance > 0.01, pts.count >= 2 else { return pts }
-    var arc: [CGFloat] = [0]
-    for i in 1..<pts.count {
-        arc.append(arc[i - 1] + hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y))
-    }
-    let total = arc[arc.count - 1]
-    guard total > 2 * distance else { return [] }
-    func point(at s: CGFloat) -> CGPoint {
-        var i = 1
-        while i < arc.count - 1 && arc[i] < s { i += 1 }
-        let seg = arc[i] - arc[i - 1]
-        let t = seg > 0 ? (s - arc[i - 1]) / seg : 0
-        return CGPoint(x: pts[i - 1].x + (pts[i].x - pts[i - 1].x) * t,
-                       y: pts[i - 1].y + (pts[i].y - pts[i - 1].y) * t)
-    }
-    var out = [point(at: distance)]
-    for i in 1..<(pts.count - 1) where arc[i] > distance && arc[i] < total - distance {
-        out.append(pts[i])
-    }
-    out.append(point(at: total - distance))
-    return out.count >= 2 ? out : []
-}
-
 /// Tiles `image` at its natural pixel size, anchored to the document origin so overlapping
 /// strokes share one sheet of paper.
 ///
@@ -360,8 +328,8 @@ private func drawHighlighter(_ shape: AnnotationShape, color: NSColor) {
     let grainMean = highlighterGrain?.meanAlpha ?? 0
     let peak = min(color.alphaComponent / max(1 - grainMean, 0.01), 1)
     let alphas = highlighterPassAlphas(highlighterProfile, peak: peak)
-    let halfWidth = shape.strokeWidth / 2
-    let faintest = highlighterProfile[highlighterProfile.count - 1].density
+    let path = CGMutablePath()
+    addSmoothStroke(pts, to: path)
 
     // Bounds the transparency layer's buffer (and the tiled grain draw) to the stroke.
     let bounds = shape.rect.insetBy(dx: -shape.strokeWidth, dy: -shape.strokeWidth)
@@ -373,20 +341,14 @@ private func drawHighlighter(_ shape: AnnotationShape, color: NSColor) {
     cg.setBlendMode(.normal)            // inside, the passes must accumulate, not multiply
     cg.setLineCap(.butt)
     cg.setLineJoin(.round)
-    cg.setLineCap(.butt)
-    cg.setLineJoin(.round)
-    // Widest (and faintest) first, narrowing to the full-density core.
+    // Widest (and faintest) pass first, narrowing down to the full-density core. All passes
+    // share one path: every pass ends on the same butt cut, which is what a swipe of a felt tip
+    // actually does (the ink stops where the nib lifts). Trimming only the faint passes instead
+    // leaves the dense narrow ones sticking out past them as a little spear at each end.
     for i in highlighterProfile.indices.reversed() where alphas[i] > 0.001 {
-        let band = highlighterProfile[i]
-        // Fainter passes stop further short of the ends, so the ink thins out towards them.
-        let taper = highlighterEndTaper * halfWidth * (1 - band.density) / (1 - faintest)
-        let bandPts = taper > 0.01 ? trimmedStroke(pts, by: taper) : pts
-        guard bandPts.count >= 2 else { continue }
-        let bandPath = CGMutablePath()
-        addSmoothStroke(bandPts, to: bandPath)
         cg.setStrokeColor(color.withAlphaComponent(alphas[i]).cgColor)
-        cg.setLineWidth(shape.strokeWidth * band.radius)
-        cg.addPath(bandPath)
+        cg.setLineWidth(shape.strokeWidth * highlighterProfile[i].radius)
+        cg.addPath(path)
         cg.strokePath()
     }
     // The grain has to be knocked into the ink as a whole, which is exactly why the ink is
