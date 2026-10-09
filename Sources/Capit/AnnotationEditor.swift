@@ -211,12 +211,23 @@ private func addSmoothStroke(_ pts: [CGPoint], to path: CGMutablePath) {
     guard pts.count >= 2 else { return }
     path.move(to: pts[0])
     guard pts.count > 2 else { path.addLine(to: pts[1]); return }
-    for i in 0..<(pts.count - 1) {
-        let p0 = pts[max(i - 1, 0)], p1 = pts[i]
-        let p2 = pts[i + 1], p3 = pts[min(i + 2, pts.count - 1)]
-        path.addCurve(to: p2,
-                      control1: CGPoint(x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6),
-                      control2: CGPoint(x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6))
+    let last = pts.count - 1
+    for i in 0..<last {
+        let p1 = pts[i], p2 = pts[i + 1]
+        // End segments get a one-sided tangent instead of the Catmull-Rom one. The interior
+        // formula reads a sample from the far side of the endpoint, so when the final segment is
+        // much shorter than its neighbours — which is exactly what trimming a band for the end fade
+        // produces — the control point lands beyond the endpoint and the curve overshoots past it.
+        // Keeping both controls inside the segment makes an overshoot impossible.
+        let p0 = i > 0 ? pts[i - 1] : p1
+        let p3 = i + 2 <= last ? pts[i + 2] : p2
+        let c1 = i == 0
+            ? CGPoint(x: p1.x + (p2.x - p1.x) / 3, y: p1.y + (p2.y - p1.y) / 3)
+            : CGPoint(x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6)
+        let c2 = i == last - 1
+            ? CGPoint(x: p2.x - (p2.x - p1.x) / 3, y: p2.y - (p2.y - p1.y) / 3)
+            : CGPoint(x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6)
+        path.addCurve(to: p2, control1: c1, control2: c2)
     }
 }
 
@@ -313,30 +324,39 @@ private func combedStroke(_ pts: [CGPoint], amplitude: CGFloat, period: CGFloat)
     return out
 }
 
-/// Drops a stalled run of samples from the end of a freehand path, keeping the point that got
-/// furthest instead of the last sample. When the pointer pauses the samples bunch up and wander
-/// inside a few pixels; stroking that tangle with a wide nib sweeps a round blob out past where
-/// the drag really ended. Detail that small is far below the nib's width, so the stalled samples
-/// carry no information — but the *reach* does, which is why the furthest point is kept.
+/// Drops a stalled run of samples from the end of a freehand path. When the pointer dwells the
+/// samples bunch up and wander, and stroking that tangle round-joins a blob half a nib wide out
+/// past where the drag actually stopped — the round head that appears when a stroke is held at
+/// the end.
+///
+/// The stall is detected as *lack of progress along the direction of travel*, not as distance from
+/// the last sample: a long dwell accumulates into a random walk that outruns any fixed distance
+/// tolerance, and cutting inside that walk leaves the centreline pointing sideways, so the stroke
+/// ends with a kink (and its own round join) instead of a square cut. Progress is monotone along a
+/// real stroke, so this keeps the shape and removes only the wandering tail.
 private func prunedTail(_ pts: [CGPoint], tolerance: CGFloat) -> [CGPoint] {
-    guard pts.count >= 4, tolerance > 0.01 else { return pts }
-    let last = pts[pts.count - 1]
-    var cut = pts.count - 1
-    while cut > 1, hypot(pts[cut - 1].x - last.x, pts[cut - 1].y - last.y) < tolerance { cut -= 1 }
-    guard cut < pts.count - 1 else { return pts }          // nothing stalled
-    // Where the drag actually reached: the furthest sample of the stalled run.
-    let start = pts[0]
-    var reach = pts[pts.count - 1]
-    var bestDistance = -1.0
-    for i in cut..<pts.count {
-        let d = hypot(pts[i].x - start.x, pts[i].y - start.y)
-        if d > bestDistance { bestDistance = d; reach = pts[i] }
-    }
-    // Keep the path up to the stall, then run straight to the reach. The tangled samples in
-    // between are dropped rather than kept: stroking them would round-join half a nib-width out
-    // past the reach, which is exactly the blob being removed.
+    guard pts.count >= 6, tolerance > 0.01 else { return pts }
+    let start = pts[0], last = pts[pts.count - 1]
+    let span = hypot(last.x - start.x, last.y - start.y)
+    guard span > tolerance else { return pts }
+    let heading = CGPoint(x: (last.x - start.x) / span, y: (last.y - start.y) / span)
+    let progress = pts.map { ($0.x - start.x) * heading.x + ($0.y - start.y) * heading.y }
+    guard let reachIndex = progress.indices.max(by: { progress[$0] < progress[$1] }),
+          reachIndex > 0 else { return pts }
+    let reach = progress[reachIndex]
+    var cut = reachIndex
+    while cut > 1, progress[cut - 1] > reach - tolerance { cut -= 1 }
+    guard cut < reachIndex else { return pts }        // nothing stalled
+    // End where the travel stopped, extended along the travel line as far as the furthest sample,
+    // so the tremor neither shortens the stroke nor tilts its cap.
+    let reachPoint = pts[reachIndex]
+    let line = hypot(reachPoint.x - start.x, reachPoint.y - start.y)
+    guard line > 0.001 else { return Array(pts[0..<cut]) }
+    let unit = CGPoint(x: (reachPoint.x - start.x) / line, y: (reachPoint.y - start.y) / line)
+    let anchor = pts[cut - 1]
+    let extend = max(0, reach - progress[cut - 1])
     var out = Array(pts[0..<cut])
-    out.append(reach)
+    out.append(CGPoint(x: anchor.x + unit.x * extend, y: anchor.y + unit.y * extend))
     return out.count >= 2 ? out : pts
 }
 
@@ -483,7 +503,15 @@ private func drawHighlighter(_ shape: AnnotationShape, color: NSColor) {
     cg.beginTransparencyLayer(auxiliaryInfo: nil)
     cg.setBlendMode(.normal)            // inside, the passes must accumulate, not multiply
     cg.setLineCap(.butt)
-    cg.setLineJoin(.round)
+    // .miter, not .round: a round join fills a disc of the full half-width at every vertex, so the
+    // vertex before the end of the stroke protrudes half a nib-width *along* the path. On a 120 px
+    // nib that is a 60 px blob past the end, and the more the path bends (the comb, or a dwell at
+    // the end) the more of those discs there are — which is the "round head". A miter join only
+    // ever extends sideways, which stays inside the stroke's own width, and for the near-straight
+    // bends of a normal stroke it measures the same as a round join. The limit keeps genuine sharp
+    // turns from spiking.
+    cg.setMiterLimit(4)
+    cg.setLineJoin(.miter)
     // Widest (and faintest) pass first, narrowing down to the full-density core. All passes
     // share one path: every pass ends on the same butt cut, which is what a swipe of a felt tip
     // actually does (the ink stops where the nib lifts). Trimming only the faint passes instead
