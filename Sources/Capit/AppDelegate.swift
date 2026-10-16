@@ -186,11 +186,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 #endif
 
+    /// Menu-bar icon size, in points.
+    ///
+    /// This is the *only* thing that changes the drawn size. Measured on a real status item: the
+    /// item draws the image at its natural ink size (the button even grows to fit it), so
+    /// `pointSize` maps to a drawn glyph of about 0.955x that — 14 -> 13.5 pt, 18 -> 17.5,
+    /// 20 -> 19.0, 22 -> 21.0 — while the symbol's own blank margin is neither scaled away from
+    /// the glyph nor counted against it. Cropping that margin out, and padding it further, were
+    /// both tried and measure identically (42 px drawn either way), so both are gone.
+    private static let statusIconPointSize: CGFloat = 17
+
     private func setupMenuBar() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
+            let config = NSImage.SymbolConfiguration(pointSize: Self.statusIconPointSize,
+                                                     weight: .regular)
             button.image = NSImage(systemSymbolName: "camera.viewfinder",
-                                   accessibilityDescription: "Capit")
+                                   accessibilityDescription: "Capit")?
+                .withSymbolConfiguration(config)
             button.image?.isTemplate = true
         }
 
@@ -283,7 +296,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Menu → 关于: show the current version.
     @objc private func showAbout() {
         let info = Bundle.main.infoDictionary
-        let short = info?["CFBundleShortVersionString"] as? String ?? "1.0.2"
+        let short = info?["CFBundleShortVersionString"] as? String ?? "1.0.3"
         let alert = NSAlert()
         alert.messageText = "关于 Capit"
         alert.informativeText = "版本 v\(short)\n\n菜单栏截图标注工具。"
