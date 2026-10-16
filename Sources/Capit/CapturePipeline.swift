@@ -92,6 +92,61 @@ enum CapturePipeline {
     }
 }
 
+/// Puts captures on the general pasteboard.
+///
+/// Two call sites, which together give the documented behaviour: right after a capture, so the
+/// un-annotated screenshot is on the clipboard even if the preview is never opened; and when an
+/// annotated image is saved, so the clipboard ends up holding what the user actually made.
+enum CaptureClipboard {
+
+    private static let defaultsKey = "CapitCopyToClipboard"
+
+    /// Whether captures go on the pasteboard at all. On by default — the whole point is that the
+    /// clipboard is already correct without the user having to think about it — and the menu
+    /// checkbox only exists to turn it off.
+    ///
+    /// Note the `object(forKey:)`: `bool(forKey:)` reports false for a key that has never been
+    /// written, which would make a default-on preference impossible to express.
+    static var isEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: defaultsKey) }
+    }
+
+    /// Copies `image` as PNG and TIFF — between them the two flavours apps actually ask for.
+    ///
+    /// The encodes run off the main thread (a 4K PNG is ~100 ms, which would be a visible hitch
+    /// on capture) and only the pasteboard write hops back, because NSPasteboard is main-thread
+    /// only. Encoding runs off-main rather than using NSBitmapImageRep, so nothing here needs
+    /// AppKit off the main thread. `pasteboard` is injectable so tests can use a private one
+    /// instead of clobbering the user's clipboard.
+    static func copy(_ image: CGImage, into pasteboard: NSPasteboard = .general) {
+        guard isEnabled else { return }
+        // NSPasteboard is main-thread only, so it is never touched outside `MainActor.run` below;
+        // this states that to the compiler rather than leaving a Sendable warning in the build.
+        nonisolated(unsafe) let board = pasteboard
+        Task.detached(priority: .utility) {
+            func encode(_ type: CFString) -> Data? {
+                let data = NSMutableData()
+                guard let dest = CGImageDestinationCreateWithData(data, type, 1, nil) else { return nil }
+                CGImageDestinationAddImage(dest, image, nil)
+                guard CGImageDestinationFinalize(dest) else { return nil }
+                return data as Data
+            }
+            let png = encode(UTType.png.identifier as CFString)
+            let tiff = encode(UTType.tiff.identifier as CFString)
+            guard png != nil || tiff != nil else { return }
+            await MainActor.run {
+                let pb = board
+                pb.clearContents()
+                let item = NSPasteboardItem()
+                if let png { item.setData(png, forType: .png) }
+                if let tiff { item.setData(tiff, forType: .tiff) }
+                pb.writeObjects([item])
+            }
+        }
+    }
+}
+
 /// Tracks the app's off-main PNG writes so the app can wait for the last in-flight write
 /// to finish before it terminates — so a capture that is just landing isn't dropped on quit.
 enum CaptureWriter {

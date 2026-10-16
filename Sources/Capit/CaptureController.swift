@@ -118,6 +118,7 @@ final class CaptureController {
             let image = try await CaptureKit.capture(display: display)
             let processed = await postProcess(image, radiusRatio: 0.03)
             playSystemScreenshotSound()
+            CaptureClipboard.copy(processed)   // un-annotated shot is on the clipboard at once
             let tmp = pendingTempURL()
             try CapturePipeline.saveTemp(image: processed, url: tmp)
             let target = activeScreen() ?? NSScreen.main
@@ -153,6 +154,7 @@ final class CaptureController {
             let processed = ImageProcessor.alreadyRoundedOrShadowed(image)
                 ? image : await postProcess(image)
             playSystemScreenshotSound()
+            CaptureClipboard.copy(processed)   // un-annotated shot is on the clipboard at once
             let tmp = pendingTempURL()
             try CapturePipeline.saveTemp(image: processed, url: tmp)
             presentPending(processed, screen: screen, finalURL: CapturePipeline.desktopURL(),

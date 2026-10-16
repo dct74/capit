@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var statusItem: NSStatusItem?
     private var autoQuitItem: NSMenuItem?
+    private var copyToClipboardItem: NSMenuItem?
     #if DEBUG
     private var selftestController: InteractiveCaptureController?
     #endif
@@ -210,6 +211,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                 keyEquivalent: "e")
         editor.keyEquivalentModifierMask = [.command]
         menu.addItem(editor)
+        let copyToClipboard = NSMenuItem(title: "拷贝到剪切板",
+                                         action: #selector(toggleCopyToClipboard), keyEquivalent: "")
+        copyToClipboard.target = self
+        copyToClipboard.state = CaptureClipboard.isEnabled ? .on : .off
+        copyToClipboardItem = copyToClipboard
+        menu.addItem(copyToClipboard)
         let autoQuit = NSMenuItem(title: "空闲 10 分钟后自动退出",
                                   action: #selector(toggleAutoQuit), keyEquivalent: "")
         autoQuit.target = self
@@ -276,7 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Menu → 关于: show the current version.
     @objc private func showAbout() {
         let info = Bundle.main.infoDictionary
-        let short = info?["CFBundleShortVersionString"] as? String ?? "1.0.1"
+        let short = info?["CFBundleShortVersionString"] as? String ?? "1.0.2"
         let alert = NSAlert()
         alert.messageText = "关于 Capit"
         alert.informativeText = "版本 v\(short)\n\n菜单栏截图标注工具。"
@@ -288,6 +295,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quit() {
         NSApplication.shared.terminate(nil)
+    }
+
+    /// Menu → 拷贝到剪切板: turn the automatic clipboard copy on or off. It is on by default; the
+    /// screenshot is copied as soon as it is taken and an annotated image replaces it on save.
+    @objc private func toggleCopyToClipboard() {
+        let enabled = !CaptureClipboard.isEnabled
+        CaptureClipboard.isEnabled = enabled
+        copyToClipboardItem?.state = enabled ? .on : .off
     }
 
     /// Menu → 空闲自动退出: opt in/out of quitting after 10 minutes of inactivity.

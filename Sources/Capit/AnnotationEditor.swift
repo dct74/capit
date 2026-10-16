@@ -881,6 +881,10 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         }
         isSaving = true
         let snapshot = out
+        // The clipboard ends up with the annotated image, replacing the un-annotated capture put
+        // there when the screenshot was taken. Done before the write on purpose: if the write
+        // fails the user still has their annotation on the clipboard rather than nothing.
+        CaptureClipboard.copy(snapshot)
         // Route the encode+write through CaptureWriter so quitting waits for it too.
         CaptureWriter.schedule {
             let outcome: SaveOutcome
