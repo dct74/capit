@@ -406,6 +406,11 @@ private func drawTiled(_ image: CGImage, in bounds: CGRect, into cg: CGContext) 
 }
 
 /// Auto continuous-corner radius for a rounded rectangle (a fraction of its shorter side).
+/// How far the rounded-rectangle corners slide from "constant stroke width" towards "equal inner
+/// and outer radius", 0...1. See the .rect case in renderShape; 0.25 halves the radius mismatch
+/// for only 10% thicker corners. Values above ~0.5 make the corners visibly fat.
+private let cornerBalance: CGFloat = 0.25
+
 private func continuousRadius(for r: CGRect) -> CGFloat {
     max(4, min(r.width, r.height) * 0.2)
 }
@@ -416,29 +421,35 @@ private func renderShape(_ shape: AnnotationShape) {
     let color = shape.color.withAlphaComponent(shape.color.alphaComponent * shape.opacity)
     switch shape.kind {
     case .rect:
+        // The two corners of a stroked rounded rectangle cannot both match the nominal radius
+        // *and* keep the ring a constant width: equal radii force the corner band to grow by up to
+        // sqrt(2). The two knobs are independent, though — the offsets set the straight-edge
+        // width, the radii only shape the arcs — so `cornerBalance` slides between them:
+        //   0 = concentric offsets, radii differ by the stroke width, corner band exactly w
+        //   1 = equal radii, corner band 1.41 w (fat corners)
+        // 0.25 halves the radius mismatch while thickening the corner by only 10%.
         let r = shape.rect
-        let radius = continuousRadius(for: r)
         let w = shape.strokeWidth
-        // Stroking a centred path puts half the ink on each side, so the corners come out with
-        // different radii: outer ≈ radius + w/2, inner ≈ radius - w/2. On thick strokes that reads
-        // as a fat outer corner and a pinched inner one. Equal radii need the two edges drawn as
-        // independent curves, i.e. a ring rather than a stroke.
+        let nominal = continuousRadius(for: r)
+        let t = cornerBalance
+        let rOut = nominal + w / 2 * (1 - t)
+        let rIn = max(0, nominal - w / 2 * (1 - t))
         let inner = r.insetBy(dx: w / 2, dy: w / 2)
         if !shape.dashed, inner.width > 0, inner.height > 0,
            let cg = NSGraphicsContext.current?.cgContext {
             let ring = CGMutablePath()
             ring.addPath(SquirclePath.cgPath(in: r.insetBy(dx: -w / 2, dy: -w / 2),
-                                             radius: radius, exponent: 3.5))
-            ring.addPath(SquirclePath.cgPath(in: inner, radius: radius, exponent: 3.5))
+                                             radius: rOut, exponent: 3.5))
+            ring.addPath(SquirclePath.cgPath(in: inner, radius: rIn, exponent: 3.5))
             color.setFill()
             cg.saveGState()
             cg.addPath(ring)
             cg.fillPath(using: .evenOdd)
             cg.restoreGState()
         } else {
-            // Dashes can't be expressed as a filled ring, so they keep the stroked path. The radius
-            // is compensated so the *outer* corner is the intended one instead of growing by w/2.
-            let path = SquirclePath.path(in: r, radius: max(0, radius - w / 2), exponent: 3.5)
+            // Dashes cannot be expressed as a filled ring, so they stroke; the radius is
+            // compensated so the *outer* corner lands where the ring's would.
+            let path = SquirclePath.path(in: r, radius: max(0, rOut - w / 2), exponent: 3.5)
             path.lineWidth = w
             color.setStroke()
             if shape.dashed { path.setLineDash([8, 6], count: 2, phase: 0) }
