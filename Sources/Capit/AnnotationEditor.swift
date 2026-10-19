@@ -417,11 +417,33 @@ private func renderShape(_ shape: AnnotationShape) {
     switch shape.kind {
     case .rect:
         let r = shape.rect
-        let path = SquirclePath.path(in: r, radius: continuousRadius(for: r), exponent: 3.5)
-        path.lineWidth = shape.strokeWidth
-        color.setStroke()
-        if shape.dashed { path.setLineDash([8, 6], count: 2, phase: 0) }
-        path.stroke()
+        let radius = continuousRadius(for: r)
+        let w = shape.strokeWidth
+        // Stroking a centred path puts half the ink on each side, so the corners come out with
+        // different radii: outer ≈ radius + w/2, inner ≈ radius - w/2. On thick strokes that reads
+        // as a fat outer corner and a pinched inner one. Equal radii need the two edges drawn as
+        // independent curves, i.e. a ring rather than a stroke.
+        let inner = r.insetBy(dx: w / 2, dy: w / 2)
+        if !shape.dashed, inner.width > 0, inner.height > 0,
+           let cg = NSGraphicsContext.current?.cgContext {
+            let ring = CGMutablePath()
+            ring.addPath(SquirclePath.cgPath(in: r.insetBy(dx: -w / 2, dy: -w / 2),
+                                             radius: radius, exponent: 3.5))
+            ring.addPath(SquirclePath.cgPath(in: inner, radius: radius, exponent: 3.5))
+            color.setFill()
+            cg.saveGState()
+            cg.addPath(ring)
+            cg.fillPath(using: .evenOdd)
+            cg.restoreGState()
+        } else {
+            // Dashes can't be expressed as a filled ring, so they keep the stroked path. The radius
+            // is compensated so the *outer* corner is the intended one instead of growing by w/2.
+            let path = SquirclePath.path(in: r, radius: max(0, radius - w / 2), exponent: 3.5)
+            path.lineWidth = w
+            color.setStroke()
+            if shape.dashed { path.setLineDash([8, 6], count: 2, phase: 0) }
+            path.stroke()
+        }
     case .ellipse:
         let path = NSBezierPath(ovalIn: shape.rect)
         path.lineWidth = shape.strokeWidth
