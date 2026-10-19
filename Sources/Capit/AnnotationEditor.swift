@@ -489,6 +489,26 @@ private func renderShape(_ shape: AnnotationShape) {
         // Mosaic is an opaque solid fill in the chosen color (default black).
         shape.color.withAlphaComponent(1).setFill()
         NSBezierPath(rect: shape.rect).fill()
+    case .spotlight:
+        // Dim everything except the selection. Filling a whole-canvas rect and the selection
+        // path together with the even-odd rule leaves the selection untouched, so the original
+        // brightness shows through there — a mask over the rest of the picture rather than a
+        // wash over it. The selection keeps the same continuous corners as the rect tool.
+        guard let cg = NSGraphicsContext.current?.cgContext else { return }
+        let outside = cg.boundingBoxOfClipPath
+        guard !outside.isEmpty, outside.width < .greatestFiniteMagnitude else { return }
+        let mask = CGMutablePath()
+        mask.addRect(outside)
+        mask.addPath(SquirclePath.cgPath(in: shape.rect,
+                                        radius: continuousRadius(for: shape.rect),
+                                        exponent: 3.5))
+        cg.saveGState()
+        cg.addPath(mask)
+        // 50% darker over the original, exactly as asked: the black overlay is drawn at half
+        // alpha, so the dimmed area is the source colour multiplied by 0.5.
+        cg.setFillColor(NSColor.black.withAlphaComponent(0.5).cgColor)
+        cg.fillPath(using: .evenOdd)
+        cg.restoreGState()
     }
 }
 
@@ -636,7 +656,7 @@ final class AnnotationHolder {
 
 /// A vector annotation shape drawn on the canvas.
 struct AnnotationShape {    enum Kind: String, CaseIterable {
-        case rect, ellipse, arrow, line, highlighter, text, number, mosaic
+        case rect, ellipse, arrow, line, highlighter, text, number, mosaic, spotlight
     }
     var kind: Kind
     var start: CGPoint
@@ -1011,7 +1031,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private var movePoints0: [CGPoint] = []
     private var movePushed = false
     private let moveKinds: Set<AnnotationShape.Kind> =
-        [.rect, .ellipse, .line, .arrow, .number, .text, .highlighter, .mosaic]
+        [.rect, .ellipse, .line, .arrow, .number, .text, .highlighter, .mosaic, .spotlight]
     /// Upper bound on captured freehand samples; past this the path is decimated
     /// instead of dropping the stroke.
     private static let highlighterMaxPoints = 4096
@@ -1417,7 +1437,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             let s = shapes[i]
             let hit: Bool
             switch s.kind {
-            case .rect, .ellipse, .mosaic:
+            case .rect, .ellipse, .mosaic, .spotlight:
                 hit = s.rect.insetBy(dx: -4, dy: -4).contains(p)
             case .line, .arrow, .highlighter:
                 hit = dist(p, to: s) <= max(6, s.strokeWidth / 2 + 3)
@@ -1681,7 +1701,8 @@ final class ToolbarView: NSView {
         let showWidth = strokeWidthKinds.contains(tool)
         linePop?.isHidden = !showLine
         widthPop?.isHidden = !showWidth
-        colorButton?.isHidden = false
+        // The spotlight is a fixed 50% dim, so a colour choice would be meaningless there.
+        colorButton?.isHidden = tool == .spotlight
         if showLine { linePop?.selectItem(at: lineDashed ? 1 : 0) }
     }
 
@@ -1722,7 +1743,8 @@ final class ToolbarView: NSView {
         let items: [(AnnotationShape.Kind, String)] = [
             (.rect, "rectangle"), (.ellipse, "circle"), (.arrow, "arrow.right"),
             (.line, "line.diagonal"), (.highlighter, "highlighter"),
-            (.text, "textformat"), (.number, "number"), (.mosaic, "square.grid.3x3")
+            (.text, "textformat"), (.number, "number"), (.mosaic, "square.grid.3x3"),
+            (.spotlight, "rectangle.dashed")
         ]
         for (kind, sym) in items {
             let b = NSButton(title: "", target: nil, action: nil)
