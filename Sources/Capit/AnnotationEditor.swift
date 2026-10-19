@@ -432,7 +432,11 @@ private enum PictureShape {
     }
 
     private static func build(_ image: CGImage) -> CGImage? {
-        let w = max(1, image.width / 2), h = max(1, image.height / 2)
+        // Full resolution. A half-scale mask put its boundary within a couple of pixels of the true
+        // edge, and eroding it to keep the error off the shadow left a one-pixel undimmed rim around
+        // the picture — visible as a light line against the window. At full resolution the threshold
+        // boundary is the picture's own edge, so no erosion is needed and there is no rim.
+        let w = max(1, image.width), h = max(1, image.height)
         // Read the alpha channel out of an RGBA copy. Drawing the image into a grey context would
         // give luminance instead, which is the picture's *colour* scaled by its alpha — a mid-grey
         // picture would then never cross the opacity threshold.
@@ -448,22 +452,11 @@ private enum PictureShape {
         guard let srcData = src.data else { return nil }
         let alpha = srcData.assumingMemoryBound(to: UInt8.self)
 
-        // Opaque without being on the picture's outer edge. The mask is built at half scale, so its
-        // boundary is accurate to a pixel or two; eroding it by one mask pixel keeps that error
-        // *inside* the picture instead of letting the dim creep onto the shadow. Losing a pixel or
-        // two at the very edge is invisible; dimming a hairline of shadow is not.
-        func opaque(_ x: Int, _ y: Int) -> Bool {
-            guard x >= 0, y >= 0, x < w, y < h else { return false }
-            return alpha[(y * w + x) * 4 + 3] >= 250
-        }
         var mask = [UInt8](repeating: 255, count: w * h)
         var anyOpaque = false
-        for y in 0..<h {
-            for x in 0..<w where opaque(x, y) && opaque(x - 1, y) && opaque(x + 1, y)
-                                && opaque(x, y - 1) && opaque(x, y + 1) {
-                anyOpaque = true
-                mask[y * w + x] = 0   // an image mask paints where the sample is 0, not where it is 255
-            }
+        for i in 0..<(w * h) where alpha[i * 4 + 3] >= 250 {
+            anyOpaque = true
+            mask[i] = 0             // an image mask paints where the sample is 0, not where it is 255
         }
         guard anyOpaque else { return nil }
         // The mask is consumed in the document's flipped space (y down), while the alpha buffer was
