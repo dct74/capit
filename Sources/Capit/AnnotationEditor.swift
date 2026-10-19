@@ -465,7 +465,18 @@ private enum PictureShape {
                 mask[y * w + x] = 0   // an image mask paints where the sample is 0, not where it is 255
             }
         }
-        guard anyOpaque, let provider = CGDataProvider(data: Data(mask) as CFData) else { return nil }
+        guard anyOpaque else { return nil }
+        // The mask is consumed in the document's flipped space (y down), while the alpha buffer was
+        // read bottom-up from an unflipped context. Drawn as-is it lands mirrored, and because a
+        // window capture's shadow padding is asymmetric (more below than above) that mirror shows up
+        // as the clip shifting off the picture — the dim then leaks onto the shadow. Reverse the
+        // rows so the mask matches the space it is used in.
+        for y in 0..<(h / 2) {
+            for x in 0..<w {
+                mask.swapAt(y * w + x, (h - 1 - y) * w + x)
+            }
+        }
+        guard let provider = CGDataProvider(data: Data(mask) as CFData) else { return nil }
         return CGImage(maskWidth: w, height: h, bitsPerComponent: 8, bitsPerPixel: 8,
                        bytesPerRow: w, provider: provider, decode: nil,
                        shouldInterpolate: true)
