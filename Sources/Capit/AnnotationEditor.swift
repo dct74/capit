@@ -473,34 +473,62 @@ private enum PictureShape {
         // within a pixel of the core the only non-picture pixels are the shadow's first ring at about
         // 25/255, which this dims by 10% — invisible on an already dark pixel — while the picture's
         // edge pixels get exactly their own coverage.
-        func opaque(_ x: Int, _ y: Int) -> UInt8 {
-            guard x >= 0, y >= 0, x < w, y < h else { return 255 }
-            return alpha[(y * w + x) * 4 + 3] >= 250 ? 0 : 255   // 0 = paint (image mask convention)
+        // Everything here is a single pass over the pixels: this runs when the editor opens, and an
+        // 8-megapixel capture made the first version take 100 ms, which is a visible hitch.
+        var base = [UInt8](repeating: 255, count: w * h)
+        for i in 0..<(w * h) where alpha[i * 4 + 3] >= 250 {
+            base[i] = 0                      // 0 = paint (image mask convention)
         }
-        let radius = 1
-        // Separable dilation of the core, used as "is this pixel within the edge band?".
-        var horizontal = [UInt8](repeating: 255, count: w * h)
-        for y in 0..<h {
-            for x in 0..<w {
-                var v: UInt8 = 255
-                for dx in -radius...radius { v = min(v, opaque(x + dx, y)) }
-                horizontal[y * w + x] = v
+        /// Separable dilation, radius 1: "is a fully opaque pixel within one step?".
+        func dilate(_ src: [UInt8]) -> [UInt8] {
+            var hor = [UInt8](repeating: 255, count: w * h)
+            for y in 0..<h {
+                let row = y * w
+                for x in 0..<w {
+                    var v = src[row + x]
+                    if x > 0 { v = min(v, src[row + x - 1]) }
+                    if x + 1 < w { v = min(v, src[row + x + 1]) }
+                    hor[row + x] = v
+                }
             }
+            var out = [UInt8](repeating: 255, count: w * h)
+            for y in 0..<h {
+                let row = y * w
+                for x in 0..<w {
+                    var v = hor[row + x]
+                    if y > 0 { v = min(v, hor[row - w + x]) }
+                    if y + 1 < h { v = min(v, hor[row + w + x]) }
+                    out[row + x] = v
+                }
+            }
+            return out
         }
+        // Distance from the opaque core, in one-pixel steps, capped at 2.
+        let band1 = dilate(base)
+        var band1Min = [UInt8](repeating: 255, count: w * h)
+        for i in 0..<(w * h) where band1[i] == 0 { band1Min[i] = 0 }
+        let band2 = dilate(band1Min)
+
+        // The eye reads a half-covered edge pixel closer to the covered side, so linear coverage
+        // looks a touch thin along bright edges; a gentle gamma compensates. Tabulated because a
+        // pow() per pixel is most of the cost.
+        let bias: [UInt8] = (0...255).map { v in
+            let c = Double(v) / 255
+            return UInt8(max(0, min(255, (1 - pow(c, 0.85)) * 255)))
+        }
+
         var mask = [UInt8](repeating: 255, count: w * h)
         var anyOpaque = false
-        for y in 0..<h {
-            for x in 0..<w {
-                var band: UInt8 = 255
-                for dy in -radius...radius {
-                    let yy = y + dy
-                    band = min(band, (yy >= 0 && yy < h) ? horizontal[yy * w + x] : 255)
-                }
-                guard band < 255 else { continue }        // further than a pixel from the picture
-                let a = Int(alpha[(y * w + x) * 4 + 3])
-                mask[y * w + x] = UInt8(255 - a)          // coverage = the pixel's own alpha
-                if a > 0 { anyOpaque = true }
-            }
+        for i in 0..<(w * h) {
+            // The weight falls off with distance instead of stopping at the band's edge: a hard cut
+            // there left a step where the picture's coverage was still a few percent — most visible
+            // at a corner, where a continuous corner's ramp is shallow and wide.
+            let weight: Double
+            if band1[i] == 0 { weight = 1 } else if band2[i] == 0 { weight = 0.5 } else { continue }
+            let coverage = min(Double(alpha[i * 4 + 3]) / 255.0, weight)
+            guard coverage > 0.002 else { continue }
+            mask[i] = bias[Int(coverage * 255)]
+            anyOpaque = true
         }
         guard anyOpaque else { return nil }
         // The mask is consumed in the document's flipped space (y down), while the alpha buffer was
