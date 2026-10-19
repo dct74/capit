@@ -452,11 +452,50 @@ private enum PictureShape {
         guard let srcData = src.data else { return nil }
         let alpha = srcData.assumingMemoryBound(to: UInt8.self)
 
+        // Take the picture as its fully opaque region — unambiguous, since the drop shadow never
+        // reaches full opacity (it peaks around 143/255 under the window) — and then *dilate* it by
+        // a couple of pixels.
+        //
+        // The dilation is what covers the picture's anti-aliased edge. Thresholding at "fully
+        // opaque" and stopping there leaves that edge undimmed, and how wide it looks depends on the
+        // angle: one pixel across a straight edge, but a horizontal scan crossing a corner arc sees
+        // 15-20, so the fringe along each arc broke where the arc met the straight edge and the
+        // corner looked sheared. Growing the region outward instead puts the dim's boundary just
+        // outside the picture's own edge, where it falls on shadow that is already dark and a pixel
+        // or two wide, so it is not visible.
+        func opaque(_ x: Int, _ y: Int) -> UInt8 {
+            guard x >= 0, y >= 0, x < w, y < h else { return 255 }
+            return alpha[(y * w + x) * 4 + 3] >= 250 ? 0 : 255   // 0 = paint (image mask convention)
+        }
+        // One pixel: the anti-aliased ring is about a pixel wide when measured perpendicular to the
+        // edge, and every further pixel of dilation is a pixel of shadow dimmed. Only pixels bright
+        // enough to be the picture's own coverage are taken from that ring — the shadow just outside
+        // the window measures about 25/255, the ring itself 70 and up — so the extra pixel does not
+        // become a dark halo.
+        let radius = 1
+        // Separable dilation: min over a horizontal window, then over a vertical one.
+        var horizontal = [UInt8](repeating: 255, count: w * h)
+        for y in 0..<h {
+            for x in 0..<w {
+                var v: UInt8 = 255
+                for dx in -radius...radius { v = min(v, opaque(x + dx, y)) }
+                horizontal[y * w + x] = v
+            }
+        }
         var mask = [UInt8](repeating: 255, count: w * h)
         var anyOpaque = false
-        for i in 0..<(w * h) where alpha[i * 4 + 3] >= 250 {
-            anyOpaque = true
-            mask[i] = 0             // an image mask paints where the sample is 0, not where it is 255
+        for y in 0..<h {
+            for x in 0..<w {
+                var v: UInt8 = 255
+                for dy in -radius...radius {
+                    let yy = y + dy
+                    v = min(v, (yy >= 0 && yy < h) ? horizontal[yy * w + x] : 255)
+                }
+                let a = Int(alpha[(y * w + x) * 4 + 3])
+                if v < 255 && a < 55 { v = 255 }     // dilation reached only shadow, not picture edge
+                mask[y * w + x] = v
+                if v < 255 { anyOpaque = true }
+            }
         }
         guard anyOpaque else { return nil }
         // The mask is consumed in the document's flipped space (y down), while the alpha buffer was
