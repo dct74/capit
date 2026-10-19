@@ -1005,8 +1005,12 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         guard !isSaving else { return }
         canvas.commitTextEditor()
         let w = image.width, h = image.height
+        // The document size is published once, by the canvas, in *points* — the space annotations
+        // are drawn in. It must not be overwritten with the pixel size here: the export CTM scales
+        // points to pixels, so a pixel-sized document makes the spotlight's fill and its picture
+        // mask twice too large, which offset the dim in the saved file only (the live canvas kept
+        // the correct value, which is why it looked right on screen).
         currentDocumentImage = image
-        currentDocumentSize = CGSize(width: w, height: h)
         let bytesPerRow = ((w * 4) + 63) & ~63
         let colorSpace = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
         // Back the context with a manually-managed buffer so the finished pixels can be handed

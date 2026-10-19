@@ -104,53 +104,6 @@ enum ImageProcessor {
         return windowWithShadow(content: rounded) ?? rounded
     }
 
-    /// The picture's rect inside an output image of `size`, in top-left-origin coordinates.
-    ///
-    /// `windowWithShadow` pads the picture with transparent room for its shadow (1.5 blur each
-    /// side, 2 on top, 3 below), and annotations are drawn over that padded document — so anything
-    /// that has to affect the picture but not its shadow needs to know where the picture sits.
-    /// Inverting the layout is exact and cheap; detecting it from the alpha channel was neither
-    /// (the shadow's own alpha made the bounds ambiguous).
-    static func contentRect(forOutputSize size: CGSize) -> CGRect? {
-        guard size.width > 0, size.height > 0 else { return nil }
-        // outW = cw + 3b, with b = clamp(34, 170, cw * 0.038): solve for cw over the three regimes.
-        var cw: CGFloat?
-        let small = size.width - 3 * 34            // b clamped at the low end
-        if small > 0, small * 0.038 <= 34 { cw = small }
-        if cw == nil {
-            let big = size.width - 3 * 170         // b clamped at the high end
-            if big * 0.038 >= 170 { cw = big }
-        }
-        if cw == nil {
-            let proportional = size.width / (1 + 3 * 0.038)
-            let b = proportional * 0.038
-            if b >= 34, b <= 170 { cw = proportional }
-        }
-        guard let estimate = cw, estimate > 0 else { return nil }
-        // The padding is integer-truncated when it is applied, so the inverse is off by up to a
-        // pixel. Snap to the width that reproduces the document exactly.
-        func pads(_ contentWidth: CGFloat) -> (blur: CGFloat, side: Int, top: Int, bottom: Int) {
-            let b = max(34.0, min(170.0, contentWidth * 0.038))
-            return (b, Int(b * 1.5), Int(b * 2.0), Int(b * 3.0))
-        }
-        var chosen = estimate.rounded()
-        for candidate in stride(from: estimate.rounded() - 3, through: estimate.rounded() + 3, by: 1) {
-            guard candidate > 0 else { continue }
-            let p = pads(candidate)
-            let height = size.height - CGFloat(p.top + p.bottom)
-            if candidate + CGFloat(p.side * 2) == size.width, height > 0 {
-                chosen = candidate
-                let contentHeight = height
-                return CGRect(x: CGFloat(p.side), y: CGFloat(p.top),
-                              width: candidate, height: contentHeight)
-            }
-        }
-        let p = pads(chosen)
-        let contentHeight = size.height - CGFloat(p.top + p.bottom)
-        guard contentHeight > 0, chosen <= size.width else { return nil }
-        return CGRect(x: CGFloat(p.side), y: CGFloat(p.top), width: chosen, height: contentHeight)
-    }
-
     static func windowWithShadow(content: CGImage,
                                  multiplier: CGFloat = 1.0) -> CGImage? {
         let cw = content.width, ch = content.height
