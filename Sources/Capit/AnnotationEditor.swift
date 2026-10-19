@@ -930,10 +930,12 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
             let img = image
             let finish = needsFinishing
             let ratio = self.radiusRatio
+            // No clipboard write here: it already holds this capture's product from the moment the
+            // screenshot was taken, and writing again would clobber whatever the user has copied
+            // since.
             CaptureWriter.schedule {
                 let finished = finish ? ImageProcessor.finished(img, radiusRatio: ratio) : img
-                try? CapturePipeline.write(image: finished, to: url)
-                CaptureClipboard.copy(finished)
+                _ = try? CapturePipeline.write(image: finished, to: url)
             }
         }
         NSApp.setActivationPolicy(.accessory)
@@ -950,10 +952,12 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
             let img = image
             let finish = needsFinishing
             let ratio = self.radiusRatio
+            // No clipboard write here: it already holds this capture's product from the moment the
+            // screenshot was taken, and writing again would clobber whatever the user has copied
+            // since.
             CaptureWriter.schedule {
                 let finished = finish ? ImageProcessor.finished(img, radiusRatio: ratio) : img
-                try? CapturePipeline.write(image: finished, to: url)
-                CaptureClipboard.copy(finished)
+                _ = try? CapturePipeline.write(image: finished, to: url)
             }
         }
     }

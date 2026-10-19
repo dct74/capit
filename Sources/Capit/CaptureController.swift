@@ -64,6 +64,20 @@ final class IdleAutoQuit {
     }
 }
 
+/// Lets a pending capture's background work know the user opened the editor, so the product copy it
+/// was about to write is not left behind as an orphan temp file.
+private final class PendingCapture {
+    private let lock = NSLock()
+    private var done = false
+    var isCancelled: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return done
+    }
+    func cancel() {
+        lock.lock(); done = true; lock.unlock()
+    }
+}
+
 /// Top-level orchestrator for the three capture modes.
 @MainActor
 final class CaptureController {
@@ -109,15 +123,11 @@ final class CaptureController {
             let display = try activeDisplay(from: content)
             let image = try await CaptureKit.capture(display: display)
             playSystemScreenshotSound()
-            // The raw capture is what the editor works on; corners and shadow are applied when the
-            // file is actually written (see ImageProcessor.finished).
-            let tmp = pendingTempURL()
-            try CapturePipeline.saveTemp(image: image, url: tmp)
             let target = activeScreen() ?? NSScreen.main
             guard let target else { return }
             presentPending(image, screen: target,
-                           finalURL: CapturePipeline.desktopURL(), tmpURL: tmp,
-                           radiusRatio: 0.03)
+                           finalURL: CapturePipeline.desktopURL(),
+                           needsFinishing: true, radiusRatio: 0.03)
         } catch {
             presentError(error)
         }
@@ -144,13 +154,11 @@ final class CaptureController {
                 throw CaptureError.imageCreationFailed
             }
             playSystemScreenshotSound()
-            // A native window capture already has rounded corners (+ shadow). It is left alone
-            // here and flagged so the editor does not decorate it a second time on save.
+            // A native window capture already carries corners and shadow; it is left alone and the
+            // flag tells the editor not to decorate it again on save.
             let decorated = ImageProcessor.alreadyRoundedOrShadowed(image)
-            let tmp = pendingTempURL()
-            try CapturePipeline.saveTemp(image: image, url: tmp)
             presentPending(image, screen: screen, finalURL: CapturePipeline.desktopURL(),
-                           tmpURL: tmp, needsFinishing: !decorated)
+                           needsFinishing: !decorated)
         } catch {
             if case CaptureError.cancelled = error { return }
             presentError(error)
@@ -235,27 +243,42 @@ final class CaptureController {
             .appendingPathComponent("capit-pending-\(UUID().uuidString).png")
     }
 
-    private func presentPending(_ image: CGImage, screen: NSScreen, finalURL: URL, tmpURL: URL,
+    private func presentPending(_ image: CGImage, screen: NSScreen, finalURL: URL,
                                needsFinishing: Bool = true,
                                radiusRatio: CGFloat = ImageProcessor.cornerRadiusRatio) {
-        // The preview only displays a small thumbnail: the full-resolution PNG is already on
-        // disk, and keeping the processed image here would hold tens of MB for the whole 4s.
+        // The product — corners and shadow applied — is made once, now, and serves both the
+        // clipboard and the file. That keeps the clipboard correct the moment the screenshot is
+        // taken instead of several seconds later when the preview expires, and it means landing the
+        // file is a move rather than another decode/decorate/encode.
+        //
+        // The raw capture is kept alongside it only because the editor works on the raw picture
+        // (annotations must not be drawn into the shadow's transparent padding).
+        let rawURL = pendingTempURL()
+        let productURL = pendingTempURL()
+        let pending = PendingCapture()
+        _ = try? CapturePipeline.saveTemp(image: image, url: rawURL)
         let thumb = ImageProcessor.thumbnail(from: image) ?? image
         PreviewPresenter.shared.present(image: thumb, screen: screen,
             onExpire: { [weak self] in
                 CaptureWriter.schedule {
                     do {
-                        // Read the raw pending capture, decorate it, write the result. The
-                        // clipboard gets the same finished image, so what is pasted matches what
-                        // landed on disk.
-                        guard let source = CGImageSourceCreateWithURL(tmpURL as CFURL, nil),
-                              let raw = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-                            throw CaptureError.imageCreationFailed
+                        // Normally the product is already on disk; fall back to decorating the raw
+                        // capture if the write had not finished (or failed).
+                        if !FileManager.default.fileExists(atPath: productURL.path) {
+                            let product = needsFinishing
+                                ? ImageProcessor.finished(image, radiusRatio: radiusRatio) : image
+                            try CapturePipeline.write(image: product, to: productURL)
                         }
-                        let finished = needsFinishing ? ImageProcessor.finished(raw, radiusRatio: radiusRatio) : raw
-                        try CapturePipeline.write(image: finished, to: finalURL)
-                        CaptureClipboard.copy(finished)
-                        try? FileManager.default.removeItem(at: tmpURL)
+                        try? FileManager.default.removeItem(at: finalURL)
+                        do {
+                            try FileManager.default.moveItem(at: productURL, to: finalURL)
+                        } catch {
+                            try FileManager.default.copyItem(at: productURL, to: finalURL)
+                            try? FileManager.default.removeItem(at: productURL)
+                        }
+                        try? FileManager.default.removeItem(at: rawURL)
+                        // The clipboard already holds this image from capture time; rewriting it
+                        // here would silently clobber whatever the user copied in the meantime.
                         NSLog("[Capit] 已保存到桌面: \(finalURL.path)")
                     } catch {
                         await MainActor.run { self?.presentError(error) }
@@ -263,10 +286,27 @@ final class CaptureController {
                 }
             },
             onOpen: { [weak self] in
-                self?.openAnnotationWindow(loadingFrom: tmpURL, fileURL: finalURL,
+                // The editor works from the raw capture; the product this capture was preparing is
+                // no longer needed, and its writer is told to stand down.
+                pending.cancel()
+                try? FileManager.default.removeItem(at: productURL)
+                self?.openAnnotationWindow(loadingFrom: rawURL, fileURL: finalURL,
                                            needsFinishing: needsFinishing,
                                            radiusRatio: radiusRatio)
             })
+
+        // Decorate and copy off the main thread, so the preview above is not held up by it.
+        CaptureWriter.schedule {
+            guard !pending.isCancelled else { return }
+            let product = needsFinishing ? ImageProcessor.finished(image, radiusRatio: radiusRatio) : image
+            CaptureClipboard.copy(product)
+            guard !pending.isCancelled else { return }   // opened while decorating
+            do {
+                try CapturePipeline.write(image: product, to: productURL)
+            } catch {
+                await MainActor.run { self.presentError(error) }
+            }
+        }
     }
 
     /// Opens the editor on the pending PNG just landed in the temp cache.
