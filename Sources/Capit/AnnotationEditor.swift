@@ -463,17 +463,22 @@ private enum PictureShape {
         // corner looked sheared. Growing the region outward instead puts the dim's boundary just
         // outside the picture's own edge, where it falls on shadow that is already dark and a pixel
         // or two wide, so it is not visible.
+        // The mask carries the picture's own anti-aliasing instead of cutting it off at a threshold.
+        // A threshold — at any level — puts a one-pixel staircase on the boundary, and on a curved
+        // edge that staircase is exactly the jagged, broken-looking seam being fixed. So: coverage is
+        // the pixel's own alpha, taken only within one pixel of the opaque core.
+        //
+        // Restricting it to that band matters. The shadow underneath the window is denser (about
+        // 143/255) than the picture's edge (about 70), so alpha cannot separate them globally; but
+        // within a pixel of the core the only non-picture pixels are the shadow's first ring at about
+        // 25/255, which this dims by 10% — invisible on an already dark pixel — while the picture's
+        // edge pixels get exactly their own coverage.
         func opaque(_ x: Int, _ y: Int) -> UInt8 {
             guard x >= 0, y >= 0, x < w, y < h else { return 255 }
             return alpha[(y * w + x) * 4 + 3] >= 250 ? 0 : 255   // 0 = paint (image mask convention)
         }
-        // One pixel: the anti-aliased ring is about a pixel wide when measured perpendicular to the
-        // edge, and every further pixel of dilation is a pixel of shadow dimmed. Only pixels bright
-        // enough to be the picture's own coverage are taken from that ring — the shadow just outside
-        // the window measures about 25/255, the ring itself 70 and up — so the extra pixel does not
-        // become a dark halo.
         let radius = 1
-        // Separable dilation: min over a horizontal window, then over a vertical one.
+        // Separable dilation of the core, used as "is this pixel within the edge band?".
         var horizontal = [UInt8](repeating: 255, count: w * h)
         for y in 0..<h {
             for x in 0..<w {
@@ -486,15 +491,15 @@ private enum PictureShape {
         var anyOpaque = false
         for y in 0..<h {
             for x in 0..<w {
-                var v: UInt8 = 255
+                var band: UInt8 = 255
                 for dy in -radius...radius {
                     let yy = y + dy
-                    v = min(v, (yy >= 0 && yy < h) ? horizontal[yy * w + x] : 255)
+                    band = min(band, (yy >= 0 && yy < h) ? horizontal[yy * w + x] : 255)
                 }
+                guard band < 255 else { continue }        // further than a pixel from the picture
                 let a = Int(alpha[(y * w + x) * 4 + 3])
-                if v < 255 && a < 55 { v = 255 }     // dilation reached only shadow, not picture edge
-                mask[y * w + x] = v
-                if v < 255 { anyOpaque = true }
+                mask[y * w + x] = UInt8(255 - a)          // coverage = the pixel's own alpha
+                if a > 0 { anyOpaque = true }
             }
         }
         guard anyOpaque else { return nil }
