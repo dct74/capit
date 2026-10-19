@@ -1888,6 +1888,41 @@ final class ToolbarView: NSView {
 
     private static let outlineKinds: Set<AnnotationShape.Kind> = [.rect, .ellipse, .arrow, .line]
 
+    /// Toolbar icon for the spotlight: a hatched ring around an empty centre — "everything around
+    /// this is covered, this is not". SF Symbols has no hatched variant, so it is drawn. Template
+    /// image, so it follows the toolbar's tint in light and dark.
+    static func spotlightToolIcon() -> NSImage {
+        let side: CGFloat = 18
+        let img = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
+            let outer = NSBezierPath(roundedRect: NSRect(x: 1.5, y: 1.5, width: 15, height: 15),
+                                     xRadius: 3.5, yRadius: 3.5)
+            outer.addClip()
+            let hatch = NSBezierPath()
+            var x: CGFloat = -16
+            while x < 22 {
+                hatch.move(to: NSPoint(x: x, y: -2))
+                hatch.line(to: NSPoint(x: x + 20, y: 20))
+                x += 2.4
+            }
+            NSColor.black.setStroke()
+            hatch.lineWidth = 1.1
+            hatch.stroke()
+
+            // Clear the middle out of the same layer, leaving the hatching as a ring.
+            if let cg = NSGraphicsContext.current?.cgContext {
+                cg.saveGState()
+                cg.setBlendMode(.destinationOut)
+                NSColor.black.setFill()
+                NSBezierPath(roundedRect: NSRect(x: 5.4, y: 5.4, width: 7.2, height: 7.2),
+                             xRadius: 1.8, yRadius: 1.8).fill()
+                cg.restoreGState()
+            }
+            return true
+        }
+        img.isTemplate = true
+        return img
+    }
+
     func setFontControlsVisible(_ visible: Bool) {
         fontPop?.isHidden = !visible
         fontLabel?.isHidden = !visible
@@ -1963,16 +1998,19 @@ final class ToolbarView: NSView {
         addSubview(stack)
 
         let items: [(AnnotationShape.Kind, String)] = [
-            (.rect, "rectangle"), (.ellipse, "circle"), (.arrow, "arrow.right"),
+            (.rect, "rectangle"), (.ellipse, "circle"),
+            (.spotlight, ""),                  // drawn below: hatching has no SF Symbol
+            (.arrow, "arrow.right"),
             (.line, "line.diagonal"), (.highlighter, "highlighter"),
-            (.text, "textformat"), (.number, "number"), (.mosaic, "square.grid.3x3"),
-            (.spotlight, "rectangle.dashed")
+            (.text, "textformat"), (.number, "number"), (.mosaic, "square.grid.3x3")
         ]
         for (kind, sym) in items {
             let b = NSButton(title: "", target: nil, action: nil)
             b.bezelStyle = .texturedRounded
             b.isBordered = false
-            b.image = NSImage(systemSymbolName: sym, accessibilityDescription: nil)
+            b.image = kind == .spotlight
+                ? Self.spotlightToolIcon()
+                : NSImage(systemSymbolName: sym, accessibilityDescription: nil)
             b.refusesFirstResponder = true
             b.focusRingType = .none
             b.target = self
