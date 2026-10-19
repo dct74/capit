@@ -116,7 +116,8 @@ final class CaptureController {
             let target = activeScreen() ?? NSScreen.main
             guard let target else { return }
             presentPending(image, screen: target,
-                           finalURL: CapturePipeline.desktopURL(), tmpURL: tmp)
+                           finalURL: CapturePipeline.desktopURL(), tmpURL: tmp,
+                           radiusRatio: 0.03)
         } catch {
             presentError(error)
         }
@@ -235,7 +236,8 @@ final class CaptureController {
     }
 
     private func presentPending(_ image: CGImage, screen: NSScreen, finalURL: URL, tmpURL: URL,
-                               needsFinishing: Bool = true) {
+                               needsFinishing: Bool = true,
+                               radiusRatio: CGFloat = ImageProcessor.cornerRadiusRatio) {
         // The preview only displays a small thumbnail: the full-resolution PNG is already on
         // disk, and keeping the processed image here would hold tens of MB for the whole 4s.
         let thumb = ImageProcessor.thumbnail(from: image) ?? image
@@ -250,7 +252,7 @@ final class CaptureController {
                               let raw = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
                             throw CaptureError.imageCreationFailed
                         }
-                        let finished = needsFinishing ? ImageProcessor.finished(raw) : raw
+                        let finished = needsFinishing ? ImageProcessor.finished(raw, radiusRatio: radiusRatio) : raw
                         try CapturePipeline.write(image: finished, to: finalURL)
                         CaptureClipboard.copy(finished)
                         try? FileManager.default.removeItem(at: tmpURL)
@@ -262,17 +264,19 @@ final class CaptureController {
             },
             onOpen: { [weak self] in
                 self?.openAnnotationWindow(loadingFrom: tmpURL, fileURL: finalURL,
-                                           needsFinishing: needsFinishing)
+                                           needsFinishing: needsFinishing,
+                                           radiusRatio: radiusRatio)
             })
     }
 
     /// Opens the editor on the pending PNG just landed in the temp cache.
     private func openAnnotationWindow(loadingFrom tmpURL: URL, fileURL: URL,
-                                      needsFinishing: Bool) {
+                                      needsFinishing: Bool, radiusRatio: CGFloat) {
         guard let ns = NSImage(contentsOf: tmpURL),
               let image = ns.cgImage(forProposedRect: nil, context: nil, hints: nil),
               let editor = AnnotationEditorController(image: image, fileURL: fileURL,
-                                                      needsFinishing: needsFinishing) else { return }
+                                                      needsFinishing: needsFinishing,
+                                                      radiusRatio: radiusRatio) else { return }
         try? FileManager.default.removeItem(at: tmpURL)
         editor.present()
     }

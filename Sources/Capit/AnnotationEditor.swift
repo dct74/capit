@@ -411,6 +411,67 @@ private func drawTiled(_ image: CGImage, in bounds: CGRect, into cg: CGContext) 
 /// for only 10% thicker corners. Values above ~0.5 make the corners visibly fat.
 private let cornerBalance: CGFloat = 0.25
 
+/// The picture's own outline inside an already-decorated document, as an image mask taken from
+/// its alpha channel: the picture is opaque, its drop shadow is not.
+///
+/// Needed only for an image that arrived with corners and shadow baked in (a native window
+/// screenshot). Deriving the outline from the padding layout instead was wrong for exactly those
+/// images — they were not produced by `windowWithShadow`, so their padding does not follow our
+/// arithmetic, and the fill landed offset from the picture.
+private enum PictureShape {
+    private static var cache: (id: ObjectIdentifier, mask: CGImage?)? = nil
+
+    /// Half scale, so the scan costs a quarter; nil when the image is fully opaque, in which case
+    /// the document already *is* the picture and no clip is needed.
+    static func mask(of image: CGImage) -> CGImage? {
+        let id = ObjectIdentifier(image)
+        if let c = cache, c.id == id { return c.mask }
+        let built = build(image)
+        cache = (id, built)
+        return built
+    }
+
+    private static func build(_ image: CGImage) -> CGImage? {
+        let w = max(1, image.width / 2), h = max(1, image.height / 2)
+        // Read the alpha channel out of an RGBA copy. Drawing the image into a grey context would
+        // give luminance instead, which is the picture's *colour* scaled by its alpha — a mid-grey
+        // picture would then never cross the opacity threshold.
+        guard let src = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                                  bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return nil
+        }
+        // The backing memory is not guaranteed to be zeroed.
+        src.clear(CGRect(x: 0, y: 0, width: w, height: h))
+        src.interpolationQuality = .none
+        src.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let srcData = src.data else { return nil }
+        let alpha = srcData.assumingMemoryBound(to: UInt8.self)
+
+        // Opaque without being on the picture's outer edge. The mask is built at half scale, so its
+        // boundary is accurate to a pixel or two; eroding it by one mask pixel keeps that error
+        // *inside* the picture instead of letting the dim creep onto the shadow. Losing a pixel or
+        // two at the very edge is invisible; dimming a hairline of shadow is not.
+        func opaque(_ x: Int, _ y: Int) -> Bool {
+            guard x >= 0, y >= 0, x < w, y < h else { return false }
+            return alpha[(y * w + x) * 4 + 3] >= 250
+        }
+        var mask = [UInt8](repeating: 255, count: w * h)
+        var anyOpaque = false
+        for y in 0..<h {
+            for x in 0..<w where opaque(x, y) && opaque(x - 1, y) && opaque(x + 1, y)
+                                && opaque(x, y - 1) && opaque(x, y + 1) {
+                anyOpaque = true
+                mask[y * w + x] = 0   // an image mask paints where the sample is 0, not where it is 255
+            }
+        }
+        guard anyOpaque, let provider = CGDataProvider(data: Data(mask) as CFData) else { return nil }
+        return CGImage(maskWidth: w, height: h, bitsPerComponent: 8, bitsPerPixel: 8,
+                       bytesPerRow: w, provider: provider, decode: nil,
+                       shouldInterpolate: true)
+    }
+}
+
 /// The document being annotated, so `renderShape` can tell the picture from its shadow padding.
 /// Set by the canvas (live) and by the export path; there is only ever one editor open at a time.
 private var currentDocumentImage: CGImage!
@@ -499,31 +560,33 @@ private func renderShape(_ shape: AnnotationShape) {
         shape.color.withAlphaComponent(1).setFill()
         NSBezierPath(rect: shape.rect).fill()
     case .spotlight:
-        // Dim the picture everywhere except the selection. Filling the picture's outline and the
-        // selection path together with the even-odd rule leaves the selection untouched, so the
-        // original brightness shows through there — a mask over the rest of the picture rather
-        // than a wash over it. The selection keeps the same continuous corners as the rect tool.
+        // Dim the picture everywhere except the selection — fill the document minus the selection
+        // with the even-odd rule, so the selection keeps its original pixels.
         //
-        // The fill is bounded by the *picture*, not the document: a processed capture carries its
-        // drop shadow as transparent padding inside the image, and dimming that would darken the
-        // shadow too.
+        // The outer boundary is the *document* edge, deliberately square. A raw capture's document
+        // is the picture, and its corners are rounded later, when the file is finished; a rounded
+        // boundary drawn here could never coincide with those corners (the finished radius is
+        // max(14 px, 0.042 x shorter side), not the annotation radius) and it left lit slivers
+        // inside them. Letting the finish step do the rounding makes the two coincide exactly, and
+        // the shadow is added outside afterwards, so it is never dimmed.
+        //
+        // A document that is *already* decorated — a native window screenshot opened via import —
+        // is the exception: its picture sits inside baked-in shadow padding, so the fill is clipped
+        // to the picture's real outline, taken from its alpha channel.
         guard let cg = NSGraphicsContext.current?.cgContext else { return }
-        // A raw capture's document *is* the picture. Only an already-decorated import has the
-        // shadow's padding inside the document, and only there does the fill need narrowing.
-        let picture = (currentDocumentIsDecorated
-                       ? ImageProcessor.contentRect(forOutputSize: currentDocumentSize)
-                       : CGRect(origin: .zero, size: currentDocumentSize))
-            ?? cg.boundingBoxOfClipPath
-        guard !picture.isEmpty, picture.width < .greatestFiniteMagnitude else { return }
-        let cornerRadius = max(4, min(picture.width, picture.height) * ImageProcessor.cornerRadiusRatio)
+        let document = CGRect(origin: .zero, size: currentDocumentSize)
+        guard !document.isEmpty, document.width < .greatestFiniteMagnitude else { return }
         let mask = CGMutablePath()
-        mask.addPath(SquirclePath.cgPath(in: picture, radius: cornerRadius, exponent: 3.5))
+        mask.addRect(document)
         mask.addPath(SquirclePath.cgPath(in: shape.rect,
                                         radius: continuousRadius(for: shape.rect),
                                         exponent: 3.5))
         cg.saveGState()
+        if currentDocumentIsDecorated,
+           let pictureMask = PictureShape.mask(of: currentDocumentImage) {
+            cg.clip(to: document, mask: pictureMask)
+        }
         cg.addPath(mask)
-        // The dim strength is the shape's opacity, so the toolbar slider drives it.
         cg.setFillColor(NSColor.black.withAlphaComponent(shape.opacity).cgColor)
         cg.fillPath(using: .evenOdd)
         cg.restoreGState()
@@ -724,6 +787,10 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
     /// captures (the editor works on the raw picture); false for an import that already carries
     /// them, so it is not decorated twice.
     private let needsFinishing: Bool
+    /// Corner radius used when this document is finished. Full-screen captures use a tighter
+    /// curve than region/window ones, so it has to travel with the capture rather than be a
+    /// constant at the point of writing.
+    private let radiusRatio: CGFloat
     private let docSize: CGSize
     private var didSave = false
     private var isSaving = false
@@ -742,11 +809,13 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
     }
 
     init?(image: CGImage, fileURL: URL?, isImported: Bool = false,
-          needsFinishing: Bool = true) {
+          needsFinishing: Bool = true,
+          radiusRatio: CGFloat = ImageProcessor.cornerRadiusRatio) {
         self.image = image
         self.fileURL = fileURL
         self.isImported = isImported
         self.needsFinishing = needsFinishing
+        self.radiusRatio = radiusRatio
         docSize = CGSize(width: CGFloat(image.width) / 2,
                          height: CGFloat(image.height) / 2)
 
@@ -784,8 +853,9 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
             rawLandingQueued = true
             let img = image
             let finish = needsFinishing
+            let ratio = self.radiusRatio
             CaptureWriter.schedule {
-                let finished = finish ? ImageProcessor.finished(img) : img
+                let finished = finish ? ImageProcessor.finished(img, radiusRatio: ratio) : img
                 try? CapturePipeline.write(image: finished, to: url)
                 CaptureClipboard.copy(finished)
             }
@@ -803,8 +873,9 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
             rawLandingQueued = true
             let img = image
             let finish = needsFinishing
+            let ratio = self.radiusRatio
             CaptureWriter.schedule {
-                let finished = finish ? ImageProcessor.finished(img) : img
+                let finished = finish ? ImageProcessor.finished(img, radiusRatio: ratio) : img
                 try? CapturePipeline.write(image: finished, to: url)
                 CaptureClipboard.copy(finished)
             }
@@ -975,13 +1046,14 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         isSaving = true
         let snapshot = out
         let finish = needsFinishing
+        let ratio = radiusRatio
         // Route the encode+write through CaptureWriter so quitting waits for it too. Corners and
         // shadow are applied here, to the annotated result, so the shadow wraps what the user
         // actually made — and the clipboard gets that same finished image.
         CaptureWriter.schedule {
             let outcome: SaveOutcome
             do {
-                let finished = finish ? ImageProcessor.finished(snapshot) : snapshot
+                let finished = finish ? ImageProcessor.finished(snapshot, radiusRatio: ratio) : snapshot
                 try CapturePipeline.write(image: finished, to: url)
                 CaptureClipboard.copy(finished)
                 outcome = .success
