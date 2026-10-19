@@ -415,6 +415,10 @@ private let cornerBalance: CGFloat = 0.25
 /// Set by the canvas (live) and by the export path; there is only ever one editor open at a time.
 private var currentDocumentImage: CGImage!
 private var currentDocumentSize: CGSize = .zero
+/// True when the document the editor works on is a *finished* image — i.e. it already has the
+/// drop shadow's transparent padding baked in (an import that came with one). Captures are raw, so
+/// their document is the picture itself and no content rect is needed.
+private var currentDocumentIsDecorated = false
 
 private func continuousRadius(for r: CGRect) -> CGFloat {
     max(4, min(r.width, r.height) * 0.2)
@@ -504,7 +508,11 @@ private func renderShape(_ shape: AnnotationShape) {
         // drop shadow as transparent padding inside the image, and dimming that would darken the
         // shadow too.
         guard let cg = NSGraphicsContext.current?.cgContext else { return }
-        let picture = ImageProcessor.contentRect(forOutputSize: currentDocumentSize)
+        // A raw capture's document *is* the picture. Only an already-decorated import has the
+        // shadow's padding inside the document, and only there does the fill need narrowing.
+        let picture = (currentDocumentIsDecorated
+                       ? ImageProcessor.contentRect(forOutputSize: currentDocumentSize)
+                       : CGRect(origin: .zero, size: currentDocumentSize))
             ?? cg.boundingBoxOfClipPath
         guard !picture.isEmpty, picture.width < .greatestFiniteMagnitude else { return }
         let cornerRadius = max(4, min(picture.width, picture.height) * ImageProcessor.cornerRadiusRatio)
@@ -712,6 +720,10 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
     /// Imported images: saving overwrites the source file, and closing without saving must
     /// NOT overwrite it with the un-annotated capture.
     private let isImported: Bool
+    /// Whether the file still has to be given its corners and shadow on the way out. True for
+    /// captures (the editor works on the raw picture); false for an import that already carries
+    /// them, so it is not decorated twice.
+    private let needsFinishing: Bool
     private let docSize: CGSize
     private var didSave = false
     private var isSaving = false
@@ -729,14 +741,17 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         sv.magnification = fit
     }
 
-    init?(image: CGImage, fileURL: URL?, isImported: Bool = false) {
+    init?(image: CGImage, fileURL: URL?, isImported: Bool = false,
+          needsFinishing: Bool = true) {
         self.image = image
         self.fileURL = fileURL
         self.isImported = isImported
+        self.needsFinishing = needsFinishing
         docSize = CGSize(width: CGFloat(image.width) / 2,
                          height: CGFloat(image.height) / 2)
 
         canvas = AnnotationCanvasView(image: image, docSize: docSize)
+        currentDocumentIsDecorated = !needsFinishing
         toolbar = ToolbarView()
 
         let screenUnderMouse = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) }
@@ -768,7 +783,12 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         if !isImported, !didSave && !isSaving && !rawLandingQueued, let url = fileURL {
             rawLandingQueued = true
             let img = image
-            CaptureWriter.schedule { try? CapturePipeline.write(image: img, to: url) }
+            let finish = needsFinishing
+            CaptureWriter.schedule {
+                let finished = finish ? ImageProcessor.finished(img) : img
+                try? CapturePipeline.write(image: finished, to: url)
+                CaptureClipboard.copy(finished)
+            }
         }
         NSApp.setActivationPolicy(.accessory)
         AnnotationHolder.shared.active = nil
@@ -782,7 +802,12 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         if !isImported, !didSave && !isSaving && !rawLandingQueued, let url = fileURL {
             rawLandingQueued = true
             let img = image
-            CaptureWriter.schedule { try? CapturePipeline.write(image: img, to: url) }
+            let finish = needsFinishing
+            CaptureWriter.schedule {
+                let finished = finish ? ImageProcessor.finished(img) : img
+                try? CapturePipeline.write(image: finished, to: url)
+                CaptureClipboard.copy(finished)
+            }
         }
     }
 
@@ -949,15 +974,16 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         }
         isSaving = true
         let snapshot = out
-        // The clipboard ends up with the annotated image, replacing the un-annotated capture put
-        // there when the screenshot was taken. Done before the write on purpose: if the write
-        // fails the user still has their annotation on the clipboard rather than nothing.
-        CaptureClipboard.copy(snapshot)
-        // Route the encode+write through CaptureWriter so quitting waits for it too.
+        let finish = needsFinishing
+        // Route the encode+write through CaptureWriter so quitting waits for it too. Corners and
+        // shadow are applied here, to the annotated result, so the shadow wraps what the user
+        // actually made — and the clipboard gets that same finished image.
         CaptureWriter.schedule {
             let outcome: SaveOutcome
             do {
-                try CapturePipeline.write(image: snapshot, to: url)
+                let finished = finish ? ImageProcessor.finished(snapshot) : snapshot
+                try CapturePipeline.write(image: finished, to: url)
+                CaptureClipboard.copy(finished)
                 outcome = .success
             } catch {
                 outcome = .failure("无法保存：\(error.localizedDescription)")

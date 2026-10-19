@@ -90,6 +90,20 @@ enum ImageProcessor {
 
     /// Adds a native-style drop shadow around an already-rounded image on a padded
     /// transparent canvas.
+    /// The decoration applied to a capture on its way to disk: continuous corners, then the native
+    /// looking drop shadow.
+    ///
+    /// Deliberately a *write-time* step rather than something done at capture. Applying it at
+    /// capture puts the shadow's transparent padding inside the document the editor works on,
+    /// which means annotations can be drawn into the padding, and every full-document effect has
+    /// to special-case "the picture but not its shadow". Applying it last keeps the editor's
+    /// coordinate space equal to the picture, and the shadow then wraps the finished result —
+    /// annotations included — instead of the picture as it looked before being annotated.
+    static func finished(_ image: CGImage, radiusRatio: CGFloat = cornerRadiusRatio) -> CGImage {
+        let rounded = applyingRoundedCorners(to: image, radiusRatio: radiusRatio) ?? image
+        return windowWithShadow(content: rounded) ?? rounded
+    }
+
     /// The picture's rect inside an output image of `size`, in top-left-origin coordinates.
     ///
     /// `windowWithShadow` pads the picture with transparent room for its shadow (1.5 blur each

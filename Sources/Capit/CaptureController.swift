@@ -102,28 +102,20 @@ final class CaptureController {
 
     // MARK: - Full screen
 
-    private func postProcess(_ image: CGImage,
-                             radiusRatio: CGFloat = ImageProcessor.cornerRadiusRatio) async -> CGImage {
-        await Task.detached(priority: .userInitiated) { () -> CGImage in
-            let rounded = ImageProcessor.applyingRoundedCorners(to: image, radiusRatio: radiusRatio) ?? image
-            return ImageProcessor.windowWithShadow(content: rounded) ?? rounded
-        }.value
-    }
-
     private func performFullScreenCapture() async {
         guard ensurePermission() else { return }
         do {
             let content = try await CaptureKit.shareableContent()
             let display = try activeDisplay(from: content)
             let image = try await CaptureKit.capture(display: display)
-            let processed = await postProcess(image, radiusRatio: 0.03)
             playSystemScreenshotSound()
-            CaptureClipboard.copy(processed)   // un-annotated shot is on the clipboard at once
+            // The raw capture is what the editor works on; corners and shadow are applied when the
+            // file is actually written (see ImageProcessor.finished).
             let tmp = pendingTempURL()
-            try CapturePipeline.saveTemp(image: processed, url: tmp)
+            try CapturePipeline.saveTemp(image: image, url: tmp)
             let target = activeScreen() ?? NSScreen.main
             guard let target else { return }
-            presentPending(processed, screen: target,
+            presentPending(image, screen: target,
                            finalURL: CapturePipeline.desktopURL(), tmpURL: tmp)
         } catch {
             presentError(error)
@@ -150,15 +142,14 @@ final class CaptureController {
                   let image = ns.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
                 throw CaptureError.imageCreationFailed
             }
-            // A native window capture already has rounded corners (+ shadow) — don't redo it.
-            let processed = ImageProcessor.alreadyRoundedOrShadowed(image)
-                ? image : await postProcess(image)
             playSystemScreenshotSound()
-            CaptureClipboard.copy(processed)   // un-annotated shot is on the clipboard at once
+            // A native window capture already has rounded corners (+ shadow). It is left alone
+            // here and flagged so the editor does not decorate it a second time on save.
+            let decorated = ImageProcessor.alreadyRoundedOrShadowed(image)
             let tmp = pendingTempURL()
-            try CapturePipeline.saveTemp(image: processed, url: tmp)
-            presentPending(processed, screen: screen, finalURL: CapturePipeline.desktopURL(),
-                           tmpURL: tmp)
+            try CapturePipeline.saveTemp(image: image, url: tmp)
+            presentPending(image, screen: screen, finalURL: CapturePipeline.desktopURL(),
+                           tmpURL: tmp, needsFinishing: !decorated)
         } catch {
             if case CaptureError.cancelled = error { return }
             presentError(error)
@@ -206,8 +197,11 @@ final class CaptureController {
                     ImageProcessor.alreadyRoundedOrShadowed(image)
                 }.value
             }
-            let result = alreadyProcessed ? image : await postProcess(image)
-            if let editor = AnnotationEditorController(image: result, fileURL: sourceURL, isImported: true) {
+            // Decoration is deferred to save, like a capture; only an image that already has it
+            // is flagged so it is not decorated twice.
+            if let editor = AnnotationEditorController(image: image, fileURL: sourceURL,
+                                                       isImported: true,
+                                                       needsFinishing: !alreadyProcessed) {
                 editor.present()
             }
         }
@@ -240,7 +234,8 @@ final class CaptureController {
             .appendingPathComponent("capit-pending-\(UUID().uuidString).png")
     }
 
-    private func presentPending(_ image: CGImage, screen: NSScreen, finalURL: URL, tmpURL: URL) {
+    private func presentPending(_ image: CGImage, screen: NSScreen, finalURL: URL, tmpURL: URL,
+                               needsFinishing: Bool = true) {
         // The preview only displays a small thumbnail: the full-resolution PNG is already on
         // disk, and keeping the processed image here would hold tens of MB for the whole 4s.
         let thumb = ImageProcessor.thumbnail(from: image) ?? image
@@ -248,7 +243,17 @@ final class CaptureController {
             onExpire: { [weak self] in
                 CaptureWriter.schedule {
                     do {
-                        try CapturePipeline.landPending(from: tmpURL, to: finalURL)
+                        // Read the raw pending capture, decorate it, write the result. The
+                        // clipboard gets the same finished image, so what is pasted matches what
+                        // landed on disk.
+                        guard let source = CGImageSourceCreateWithURL(tmpURL as CFURL, nil),
+                              let raw = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+                            throw CaptureError.imageCreationFailed
+                        }
+                        let finished = needsFinishing ? ImageProcessor.finished(raw) : raw
+                        try CapturePipeline.write(image: finished, to: finalURL)
+                        CaptureClipboard.copy(finished)
+                        try? FileManager.default.removeItem(at: tmpURL)
                         NSLog("[Capit] 已保存到桌面: \(finalURL.path)")
                     } catch {
                         await MainActor.run { self?.presentError(error) }
@@ -256,15 +261,18 @@ final class CaptureController {
                 }
             },
             onOpen: { [weak self] in
-                self?.openAnnotationWindow(loadingFrom: tmpURL, fileURL: finalURL)
+                self?.openAnnotationWindow(loadingFrom: tmpURL, fileURL: finalURL,
+                                           needsFinishing: needsFinishing)
             })
     }
 
     /// Opens the editor on the pending PNG just landed in the temp cache.
-    private func openAnnotationWindow(loadingFrom tmpURL: URL, fileURL: URL) {
+    private func openAnnotationWindow(loadingFrom tmpURL: URL, fileURL: URL,
+                                      needsFinishing: Bool) {
         guard let ns = NSImage(contentsOf: tmpURL),
               let image = ns.cgImage(forProposedRect: nil, context: nil, hints: nil),
-              let editor = AnnotationEditorController(image: image, fileURL: fileURL) else { return }
+              let editor = AnnotationEditorController(image: image, fileURL: fileURL,
+                                                      needsFinishing: needsFinishing) else { return }
         try? FileManager.default.removeItem(at: tmpURL)
         editor.present()
     }

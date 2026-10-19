@@ -77,19 +77,6 @@ enum CapturePipeline {
         return desc == processedMarker
     }
 
-    /// Lands a fully-rendered pending PNG at its final destination. This is a file move, not a
-    /// re-encode: the pixels (and the processed marker) are already final on disk.
-    static func landPending(from tmpURL: URL, to finalURL: URL) throws {
-        let fm = FileManager.default
-        try? fm.removeItem(at: finalURL)
-        do {
-            try fm.moveItem(at: tmpURL, to: finalURL)
-        } catch {
-            // e.g. across volumes: fall back to a copy, then drop the pending file.
-            try fm.copyItem(at: tmpURL, to: finalURL)
-            try? fm.removeItem(at: tmpURL)
-        }
-    }
 }
 
 /// Puts captures on the general pasteboard.
