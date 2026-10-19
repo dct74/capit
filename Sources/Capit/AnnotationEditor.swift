@@ -411,6 +411,11 @@ private func drawTiled(_ image: CGImage, in bounds: CGRect, into cg: CGContext) 
 /// for only 10% thicker corners. Values above ~0.5 make the corners visibly fat.
 private let cornerBalance: CGFloat = 0.25
 
+/// The document being annotated, so `renderShape` can tell the picture from its shadow padding.
+/// Set by the canvas (live) and by the export path; there is only ever one editor open at a time.
+private var currentDocumentImage: CGImage!
+private var currentDocumentSize: CGSize = .zero
+
 private func continuousRadius(for r: CGRect) -> CGFloat {
     max(4, min(r.width, r.height) * 0.2)
 }
@@ -490,23 +495,28 @@ private func renderShape(_ shape: AnnotationShape) {
         shape.color.withAlphaComponent(1).setFill()
         NSBezierPath(rect: shape.rect).fill()
     case .spotlight:
-        // Dim everything except the selection. Filling a whole-canvas rect and the selection
-        // path together with the even-odd rule leaves the selection untouched, so the original
-        // brightness shows through there — a mask over the rest of the picture rather than a
-        // wash over it. The selection keeps the same continuous corners as the rect tool.
+        // Dim the picture everywhere except the selection. Filling the picture's outline and the
+        // selection path together with the even-odd rule leaves the selection untouched, so the
+        // original brightness shows through there — a mask over the rest of the picture rather
+        // than a wash over it. The selection keeps the same continuous corners as the rect tool.
+        //
+        // The fill is bounded by the *picture*, not the document: a processed capture carries its
+        // drop shadow as transparent padding inside the image, and dimming that would darken the
+        // shadow too.
         guard let cg = NSGraphicsContext.current?.cgContext else { return }
-        let outside = cg.boundingBoxOfClipPath
-        guard !outside.isEmpty, outside.width < .greatestFiniteMagnitude else { return }
+        let picture = ImageProcessor.contentRect(forOutputSize: currentDocumentSize)
+            ?? cg.boundingBoxOfClipPath
+        guard !picture.isEmpty, picture.width < .greatestFiniteMagnitude else { return }
+        let cornerRadius = max(4, min(picture.width, picture.height) * ImageProcessor.cornerRadiusRatio)
         let mask = CGMutablePath()
-        mask.addRect(outside)
+        mask.addPath(SquirclePath.cgPath(in: picture, radius: cornerRadius, exponent: 3.5))
         mask.addPath(SquirclePath.cgPath(in: shape.rect,
                                         radius: continuousRadius(for: shape.rect),
                                         exponent: 3.5))
         cg.saveGState()
         cg.addPath(mask)
-        // 50% darker over the original, exactly as asked: the black overlay is drawn at half
-        // alpha, so the dimmed area is the source colour multiplied by 0.5.
-        cg.setFillColor(NSColor.black.withAlphaComponent(0.5).cgColor)
+        // The dim strength is the shape's opacity, so the toolbar slider drives it.
+        cg.setFillColor(NSColor.black.withAlphaComponent(shape.opacity).cgColor)
         cg.fillPath(using: .evenOdd)
         cg.restoreGState()
     }
@@ -816,12 +826,15 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         toolbar.onWidth = { [weak self] w in self?.canvas.setCurrentWidth(w) }
         toolbar.onFontSize = { [weak self] s in self?.canvas.setLiveTextSize(s) }
         toolbar.onLineStyle = { [weak self] dashed in self?.canvas.setLineDashed(dashed) }
+        toolbar.onSpotlightOpacity = { [weak self] v in self?.canvas.setSpotlightOpacity(v) }
         toolbar.onSave = { [weak self] in self?.save() }
         canvas.onCurrentWidthChanged = { [weak self] width in self?.toolbar.setWidthDisplay(width) }
         canvas.onActiveTool = { [weak self] kind in
             guard let self else { return }
             self.toolbar.setActiveTool(kind,
                                        lineDashed: self.canvas.effectiveLineDashed)
+            // Selecting an existing spotlight adopts its opacity, so the slider has to follow.
+            self.toolbar.setSpotlightOpacityDisplay(self.canvas.spotlightOpacity)
         }
 
         window.contentView = content
@@ -885,6 +898,8 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         guard !isSaving else { return }
         canvas.commitTextEditor()
         let w = image.width, h = image.height
+        currentDocumentImage = image
+        currentDocumentSize = CGSize(width: w, height: h)
         let bytesPerRow = ((w * 4) + 63) & ~63
         let colorSpace = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
         // Back the context with a manually-managed buffer so the finished pixels can be handed
@@ -1217,6 +1232,10 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         currentKind = kind
         strokeColor = colorFor(kind)
         strokeWidth = defaultWidth(for: kind)
+        if kind == .spotlight, let i = selectedIndex, i < shapes.count,
+           shapes[i].kind == .spotlight {
+            spotlightOpacity = shapes[i].opacity
+        }
         lineDashed = false   // line style falls back to solid when switching tools/shapes
         notifyWidthDisplay()
         onActiveTool?(kind)
@@ -1297,6 +1316,19 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         return lineDashed
     }
 
+    /// Dim strength for a new spotlight, mirrored by the toolbar slider.
+    var spotlightOpacity: CGFloat = 0.5
+
+    func setSpotlightOpacity(_ value: CGFloat) {
+        let clamped = min(max(value, 0.05), 0.95)
+        spotlightOpacity = clamped
+        if let i = selectedIndex, i < shapes.count, shapes[i].kind == .spotlight {
+            pushState()
+            shapes[i].opacity = clamped
+            needsDisplay = true
+        }
+    }
+
     func setCurrentWidth(_ width: CGFloat) {
         strokeWidth = width
         if let i = selectedIndex, i < shapes.count,
@@ -1314,6 +1346,8 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private var inProgress: AnnotationShape?
 
     init(image: CGImage, docSize: CGSize) {
+        currentDocumentImage = image
+        currentDocumentSize = docSize
         self.baseDraw = NSImage(cgImage: image,
                                 size: NSSize(width: docSize.width, height: docSize.height))
         super.init(frame: NSRect(origin: .zero, size: docSize))
@@ -1552,7 +1586,8 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             needsDisplay = true
         default:
             var shape = AnnotationShape(kind: currentKind, start: p, end: p,
-                                        color: color, strokeWidth: strokeWidth, opacity: 1)
+                                        color: color, strokeWidth: strokeWidth,
+                                        opacity: currentKind == .spotlight ? spotlightOpacity : 1)
             if Self.outlineKinds.contains(currentKind) { shape.dashed = lineDashed }
             if currentKind == .highlighter {
                 // Freehand by default. The samples are spline-smoothed, so the stroke reads as
@@ -1661,10 +1696,13 @@ final class ToolbarView: NSView {
     var onWidth: ((CGFloat) -> Void)?
     var onFontSize: ((CGFloat) -> Void)?
     var onLineStyle: ((Bool) -> Void)?
+    var onSpotlightOpacity: ((CGFloat) -> Void)?
     var onSave: (() -> Void)?
     var onPanelColorSeed: (() -> NSColor)?
 
     private var fontPop: NSPopUpButton?
+    private var opacitySlider: NSSlider?
+    private var opacityLabel: NSTextField?
     private var fontLabel: NSTextField?
     private var linePop: NSPopUpButton?
     private var widthPop: NSPopUpButton?
@@ -1692,6 +1730,8 @@ final class ToolbarView: NSView {
         widthPop?.isHidden = true
         linePop?.isHidden = true
         colorButton?.isHidden = true
+        opacitySlider?.isHidden = true
+        opacityLabel?.isHidden = true
         fontPop?.isHidden = true
         fontLabel?.isHidden = true
     }
@@ -1701,8 +1741,12 @@ final class ToolbarView: NSView {
         let showWidth = strokeWidthKinds.contains(tool)
         linePop?.isHidden = !showLine
         widthPop?.isHidden = !showWidth
-        // The spotlight is a fixed 50% dim, so a colour choice would be meaningless there.
-        colorButton?.isHidden = tool == .spotlight
+        // The spotlight has no colour or line style — it is a black dim whose strength comes from
+        // its opacity, so that gets a slider of its own instead.
+        let spotlight = tool == .spotlight
+        colorButton?.isHidden = spotlight
+        opacitySlider?.isHidden = !spotlight
+        opacityLabel?.isHidden = !spotlight
         if showLine { linePop?.selectItem(at: lineDashed ? 1 : 0) }
     }
 
@@ -1796,6 +1840,21 @@ final class ToolbarView: NSView {
         stack.addArrangedSubview(lpop)
         self.linePop = lpop
 
+        let dimLabel = NSTextField(labelWithString: "压暗")
+        dimLabel.font = NSFont.systemFont(ofSize: 12)
+        dimLabel.isHidden = true
+        stack.addArrangedSubview(dimLabel)
+        self.opacityLabel = dimLabel
+
+        let slider = NSSlider(value: 0.5, minValue: 0.05, maxValue: 0.95,
+                              target: self, action: #selector(spotlightOpacityChanged(_:)))
+        slider.controlSize = .small
+        slider.isContinuous = true          // live feedback while dragging
+        slider.isHidden = true
+        slider.widthAnchor.constraint(equalToConstant: 90).isActive = true
+        stack.addArrangedSubview(slider)
+        self.opacitySlider = slider
+
         let sizeLabel = NSTextField(labelWithString: "字号")
         sizeLabel.font = NSFont.systemFont(ofSize: 12)
         sizeLabel.isHidden = true
@@ -1879,6 +1938,15 @@ final class ToolbarView: NSView {
                 }
             }
         }
+    }
+
+    @objc private func spotlightOpacityChanged(_ sender: NSSlider) {
+        onSpotlightOpacity?(CGFloat(sender.doubleValue))
+    }
+
+    /// Reflects the pending value back into the slider (e.g. after selecting a spotlight).
+    func setSpotlightOpacityDisplay(_ value: CGFloat) {
+        opacitySlider?.doubleValue = Double(value)
     }
 
     @objc private func widthChanged(_ sender: NSPopUpButton) {
