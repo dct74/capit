@@ -1450,7 +1450,9 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         needsDisplay = true
     }
 
-    static let defaultStrokeWidth: CGFloat = 3
+    /// Default line width for the outline tools (rect, ellipse, line, arrow). The highlighter has
+    /// its own default; it is a nib width, not a stroke width.
+    static let defaultStrokeWidth: CGFloat = 2
 
     var onCurrentWidthChanged: ((CGFloat) -> Void)?
     var onActiveTool: ((AnnotationShape.Kind) -> Void)?
@@ -2043,7 +2045,7 @@ final class ToolbarView: NSView {
 
         let widthPopup = NSPopUpButton(frame: .zero, pullsDown: false)
         widthPopup.addItems(withTitles: ["1", "2", "3", "5", "8", "12", "16", "18", "24", "36", "48", "72"])
-        widthPopup.selectItem(withTitle: "3")
+        widthPopup.selectItem(withTitle: "2")
         widthPopup.target = self
         widthPopup.action = #selector(widthChanged(_:))
         widthPopup.widthAnchor.constraint(equalToConstant: 64).isActive = true
