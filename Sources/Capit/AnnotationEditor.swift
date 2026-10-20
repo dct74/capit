@@ -595,18 +595,56 @@ private func renderShape(_ shape: AnnotationShape) {
         } else {
             // Dashes cannot be expressed as a filled ring, so they stroke; the radius is
             // compensated so the *outer* corner lands where the ring's would.
-            let path = SquirclePath.path(in: r, radius: max(0, rOut - w / 2), exponent: 3.5)
-            path.lineWidth = w
-            color.setStroke()
-            if shape.dashed { path.setLineDash([8, 6], count: 2, phase: 0) }
-            path.stroke()
+            let radius = max(0, rOut - w / 2)
+            let outline = SquirclePath.cgPath(in: r, radius: radius, exponent: 3.5)
+            if shape.dashed, let cg = NSGraphicsContext.current?.cgContext {
+                // Anchored at the middle of each corner arc. SquirclePath's parameter is not arc
+                // length: its k = 0.5 sits almost on the straight edge (u = 0.5 r, v = 0.027 r), not
+                // at the visual corner. The point where u = v is k = 0.5^(1/n), which with the
+                // squircle exponent of 3.5 is about 0.82 of the way along the corner's samples.
+                let points = polyline(of: outline)
+                let perCorner = points.count / 4
+                let steps = max(1, perCorner - 1)
+                let midK = pow(0.5, 1.0 / 3.5)
+                let midStep = Int((Double(steps) * midK).rounded())
+                let anchors = (0..<4).map { $0 * perCorner + midStep }
+                strokeDashedOutline(points, anchors: anchors, dash: 8, period: 14,
+                                    lineWidth: w, color: color, into: cg)
+            } else {
+                // NSBezierPath(cgPath:) is macOS 14+; the project targets 13, so the solid path is
+                // built the way it always was.
+                let path = SquirclePath.path(in: r, radius: radius, exponent: 3.5)
+                path.lineWidth = w
+                color.setStroke()
+                path.stroke()
+            }
         }
     case .ellipse:
-        let path = NSBezierPath(ovalIn: shape.rect)
-        path.lineWidth = shape.strokeWidth
-        color.setStroke()
-        if shape.dashed { path.setLineDash([8, 6], count: 2, phase: 0) }
-        path.stroke()
+        let ellipse = shape.rect
+        if shape.dashed, let cg = NSGraphicsContext.current?.cgContext,
+           ellipse.width > 1, ellipse.height > 1 {
+            // Anchored at the two ends of the major axis — the ellipse's vertices — which is where
+            // a gap is most conspicuous.
+            let steps = 240
+            let cx = ellipse.midX, cy = ellipse.midY
+            let a = ellipse.width / 2, b = ellipse.height / 2
+            var points: [CGPoint] = []
+            points.reserveCapacity(steps)
+            for i in 0..<steps {
+                let t = 2 * Double.pi * Double(i) / Double(steps)
+                points.append(CGPoint(x: cx + a * CGFloat(cos(t)), y: cy + b * CGFloat(sin(t))))
+            }
+            let horizontal = a >= b
+            // Index of angle 0 and of angle π (or π/2 and 3π/2) in the sampled sequence.
+            let anchors = horizontal ? [0, steps / 2] : [steps / 4, 3 * steps / 4]
+            strokeDashedOutline(points, anchors: anchors, dash: 8, period: 14,
+                                lineWidth: shape.strokeWidth, color: color, into: cg)
+        } else {
+            let path = NSBezierPath(ovalIn: ellipse)
+            path.lineWidth = shape.strokeWidth
+            color.setStroke()
+            path.stroke()
+        }
     case .line, .arrow:
         let path = NSBezierPath()
         path.move(to: shape.start)
@@ -769,6 +807,73 @@ private func drawHighlighter(_ shape: AnnotationShape, color: NSColor) {
     }
     cg.endTransparencyLayer()
     cg.restoreGState()
+}
+
+/// Strokes a closed polyline as dashes, tiling each stretch between anchors independently so that
+/// every anchor carries a dash and nothing is left to the luck of where the pattern happens to
+/// start.
+///
+/// Within a segment of length L the period is `L / round(L / period)`, and the dash pattern is
+/// stroked with a phase of half a dash. That puts exactly half a dash at each end of the segment,
+/// so the two halves meeting at an anchor make one whole dash there — and the pattern still tiles
+/// the stretch exactly, leaving no doubled gap and no dash butting into another.
+///
+/// `anchors` are indices into `points`; consecutive anchors define a segment, wrapping around.
+private func strokeDashedOutline(_ points: [CGPoint], anchors: [Int],
+                                 dash: CGFloat, period: CGFloat,
+                                 lineWidth: CGFloat, color: NSColor, into cg: CGContext) {
+    guard points.count >= 4, anchors.count >= 2, period > 1 else { return }
+    let sorted = anchors.map { max(0, min(points.count - 1, $0)) }.sorted()
+    func length(_ a: Int, _ b: Int) -> CGFloat {
+        var total: CGFloat = 0
+        var i = a
+        while i != b {
+            let next = (i + 1) % points.count
+            total += hypot(points[next].x - points[i].x, points[next].y - points[i].y)
+            i = next
+        }
+        return total
+    }
+    cg.saveGState()
+    cg.setLineWidth(lineWidth)
+    cg.setLineCap(.butt)
+    cg.setStrokeColor(color.cgColor)
+    for k in sorted.indices {
+        let from = sorted[k]
+        let to = sorted[(k + 1) % sorted.count]
+        let span = length(from, to)
+        guard span > 0.5 else { continue }
+        // How many periods fit, then redistribute them so the span is filled exactly.
+        let n = max(1, (span / period).rounded())
+        let p = span / n
+        let d = min(dash, p * 0.6)            // a dash can never swallow its own gap
+        let path = CGMutablePath()
+        path.move(to: points[from])
+        var i = from
+        while i != to {
+            let next = (i + 1) % points.count
+            path.addLine(to: points[next])
+            i = next
+        }
+        cg.addPath(path)
+        cg.setLineDash(phase: d / 2, lengths: [d, p - d])
+        cg.strokePath()
+    }
+    cg.setLineDash(phase: 0, lengths: [])
+    cg.restoreGState()
+}
+
+/// The polyline of a CGPath, in order.
+private func polyline(of path: CGPath) -> [CGPoint] {
+    var pts: [CGPoint] = []
+    path.applyWithBlock { element in
+        let e = element.pointee
+        switch e.type {
+        case .moveToPoint, .addLineToPoint: pts.append(e.points[0])
+        default: break                      // the squircle path is line segments only
+        }
+    }
+    return pts
 }
 
 /// Arrowhead: two non-filled arms from the tip sweeping back at 45° each (90° total); each
