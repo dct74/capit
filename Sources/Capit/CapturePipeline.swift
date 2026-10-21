@@ -30,15 +30,42 @@ enum CapturePipeline {
     /// The eventual on-disk destination on the Desktop. If another pending capture in this
     /// run already claimed the same second-granularity name, a numeric suffix is appended.
     static func desktopURL(date: Date = Date()) -> URL {
-        let stem = fileName(date)
-        var candidate = desktopDir.appendingPathComponent(stem)
+        uniqueDestination(desktopDir.appendingPathComponent(fileName(date)))
+    }
+
+    /// Picks a destination nobody has claimed *and* that does not already exist on disk.
+    ///
+    /// Checking the filesystem matters: the name is second-granular, so a capture taken in the same
+    /// second as one from an earlier run would otherwise reuse the name — and landing replaces the
+    /// existing file, silently destroying it.
+    static func uniqueDestination(_ url: URL) -> URL {
+        let picked = firstFree(from: url) {
+            usedFinalURLs.contains($0.path) || FileManager.default.fileExists(atPath: $0.path)
+        }
+        usedFinalURLs.insert(picked.path)
+        return picked
+    }
+
+    /// Filesystem only — the late check made right before a file is moved into place.
+    static func uniqueOnDisk(_ url: URL) -> URL {
+        firstFree(from: url) { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// `capit-…-120406.png` → `capit-…-120406-2.png`. The suffix is appended to the whole stem so a
+    /// timestamp in the name is never mistaken for a counter.
+    private static func firstFree(from url: URL, isTaken: (URL) -> Bool) -> URL {
+        let folder = url.deletingLastPathComponent()
+        let stem = url.deletingPathExtension().lastPathComponent
+        let ext = url.pathExtension
+        var candidate = url
         var n = 2
-        while !usedFinalURLs.insert(candidate.path).inserted {
-            candidate = desktopDir.appendingPathComponent("\(stem)-\(n)")
+        while isTaken(candidate) {
+            candidate = folder.appendingPathComponent("\(stem)-\(n)").appendingPathExtension(ext)
             n += 1
         }
         return candidate
     }
+
     private static var usedFinalURLs: Set<String> = []
 
     /// Marker written into every PNG Capit exports, so re-importing our own output doesn't
@@ -46,19 +73,66 @@ enum CapturePipeline {
     static let processedMarker = "CapitProcessed"
 
     /// Encodes `image` as PNG at `url`, tagging it as already rounded+shadowed.
-    static func write(image: CGImage, to url: URL) throws {
-        guard let dest = CGImageDestinationCreateWithURL(url as CFURL,
+    ///
+    /// `sourceProperties` are metadata dictionaries copied from a file being re-saved through the
+    /// editor (EXIF, GPS, IPTC, …). Without them, annotating an imported photo silently stripped all
+    /// of its metadata.
+    ///
+    /// The write itself goes to a sibling temp file and is then moved into place, so an interrupted
+    /// write cannot leave a truncated PNG at the destination.
+    static func write(image: CGImage, to url: URL,
+                      sourceProperties: [CFString: Any] = [:]) throws {
+        let folder = url.deletingLastPathComponent()
+        let temp = folder.appendingPathComponent(".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: temp) }
+
+        guard let dest = CGImageDestinationCreateWithURL(temp as CFURL,
                                                          UTType.png.identifier as CFString,
                                                          1, nil) else {
             throw CaptureError.imageWriteFailed
         }
-        let props: [CFString: Any] = [
-            kCGImagePropertyPNGDictionary: [kCGImagePropertyPNGDescription: processedMarker]
-        ]
+        var props = sourceProperties
+        // Merge rather than overwrite the PNG dictionary, so the marker sits alongside anything else.
+        var pngDict = props[kCGImagePropertyPNGDictionary] as? [CFString: Any] ?? [:]
+        pngDict[kCGImagePropertyPNGDescription] = processedMarker
+        props[kCGImagePropertyPNGDictionary] = pngDict
         CGImageDestinationAddImage(dest, image, props as CFDictionary)
         guard CGImageDestinationFinalize(dest) else {
             throw CaptureError.imageWriteFailed
         }
+        try atomicReplace(temp, url)
+    }
+
+    /// Moves a finished temp file onto the destination without ever leaving a half-written file.
+    static func atomicReplace(_ temp: URL, _ destination: URL) throws {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: destination.path) {
+            _ = try fm.replaceItemAt(destination, withItemAt: temp)
+        } else {
+            try fm.moveItem(at: temp, to: destination)
+        }
+    }
+
+    /// Metadata worth carrying from a file being re-saved: the general dictionaries, minus anything
+    /// that describes the old container or an orientation the pixels no longer need.
+    static func metadata(from url: URL,
+                         forOutputType type: CFString = UTType.png.identifier as CFString) -> [CFString: Any] {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else {
+            return [:]
+        }
+        let outputIsPNG = type == (UTType.png.identifier as CFString)
+        var out: [CFString: Any] = [:]
+        for (key, value) in props {
+            if key == kCGImagePropertyOrientation { continue }
+            if outputIsPNG,
+               key == kCGImagePropertyJFIFDictionary || key == kCGImagePropertyHEICSDictionary
+               || key == kCGImagePropertyPNGDictionary {
+                continue                       // container-specific to the source
+            }
+            out[key] = value
+        }
+        return out
     }
 
     /// True if the PNG at `url` was written by Capit (carries the processed marker).

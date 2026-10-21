@@ -20,7 +20,7 @@ enum ImageProcessor {
         // AppKit drawing is not safe there. Verified byte-identical to the NSImage/NSBitmapImageRep
         // version it replaced, anti-aliased corner edges included.
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
-                                  bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                  bytesPerRow: 0, space: image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!,
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
             return nil
         }
@@ -110,7 +110,8 @@ enum ImageProcessor {
         // shadow padding are never painted, so they must start transparent rather than hold whatever
         // the buffer happened to contain.
         guard let ctx = CGContext(data: nil, width: outW, height: outH, bitsPerComponent: 8,
-                                  bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                  bytesPerRow: 0,
+                                  space: content.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!,
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
             return nil
         }

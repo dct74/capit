@@ -1246,6 +1246,11 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         let snapshot = out
         let finish = needsFinishing
         let ratio = radiusRatio
+        // Re-saving an imported file must not throw its EXIF/GPS/IPTC away.
+        let inherited: [CFString: Any] = {
+            guard isImported, let source = fileURL else { return [:] }
+            return CapturePipeline.metadata(from: source)
+        }()
         // Route the encode+write through CaptureWriter so quitting waits for it too. Corners and
         // shadow are applied here, to the annotated result, so the shadow wraps what the user
         // actually made — and the clipboard gets that same finished image.
@@ -1253,7 +1258,7 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
             let outcome: SaveOutcome
             do {
                 let finished = finish ? ImageProcessor.finished(snapshot, radiusRatio: ratio) : snapshot
-                try CapturePipeline.write(image: finished, to: url)
+                try CapturePipeline.write(image: finished, to: url, sourceProperties: inherited)
                 CaptureClipboard.copy(finished)
                 outcome = .success
             } catch {

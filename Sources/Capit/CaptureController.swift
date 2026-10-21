@@ -268,13 +268,10 @@ final class CaptureController {
                                 ? ImageProcessor.finished(image, radiusRatio: radiusRatio) : image
                             try CapturePipeline.write(image: product, to: productURL)
                         }
-                        try? FileManager.default.removeItem(at: finalURL)
-                        do {
-                            try FileManager.default.moveItem(at: productURL, to: finalURL)
-                        } catch {
-                            try FileManager.default.copyItem(at: productURL, to: finalURL)
-                            try? FileManager.default.removeItem(at: productURL)
-                        }
+                        // The destination was made unique at capture time, but a file could have
+                        // appeared since; never replace one blindly.
+                        let destination = CapturePipeline.uniqueOnDisk(finalURL)
+                        try CapturePipeline.atomicReplace(productURL, destination)
                         // The clipboard already holds this image from capture time; rewriting it
                         // here would silently clobber whatever the user copied in the meantime.
                         NSLog("[Capit] 已保存到桌面: \(finalURL.path)")
