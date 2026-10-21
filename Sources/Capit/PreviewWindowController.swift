@@ -94,6 +94,10 @@ final class PreviewWindowController: NSObject {
     }
 
     func mouseDown(_ point: CGPoint) {
+        // Once dismissed — by the timeout, or by a newer capture replacing this one — the panel is
+        // only fading out. A click during that fade opened the editor while the landing writer was
+        // already moving the file, which could lose the capture.
+        guard !dismissed else { return }
         downPoint = point
         moved = false
     }
@@ -108,11 +112,12 @@ final class PreviewWindowController: NSObject {
     }
 
     func mouseUp(_ point: CGPoint) {
+        guard downPoint != nil else { return }      // interaction did not start on this panel
+        defer { downPoint = nil }
         if !moved {
             dismiss()
             onOpen?()
         }
-        downPoint = nil
     }
 }
 

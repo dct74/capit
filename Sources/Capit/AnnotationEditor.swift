@@ -983,12 +983,19 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
     private var observers: [NSObjectProtocol] = []
     private weak var scrollView: NSScrollView?
 
+    /// Fits the document to the viewport — but only while the user has not chosen a zoom of their
+    /// own. A window resize used to snap a 3x zoom back to "fit" mid-edit.
+    private var lastFitMagnification: CGFloat = 0
+
     private func relayoutImage() {
         guard let sv = scrollView else { return }
         let cs = sv.contentSize
         guard cs.width > 1, cs.height > 1 else { return }
         let fit = min(cs.width / docSize.width, cs.height / docSize.height)
-        sv.magnification = fit
+        let isStillAutoFit = lastFitMagnification == 0
+            || abs(sv.magnification - lastFitMagnification) < 0.001
+        if isStillAutoFit { sv.magnification = fit }
+        lastFitMagnification = fit
     }
 
     init?(image: CGImage, fileURL: URL?, isImported: Bool = false,
