@@ -419,15 +419,17 @@ private let cornerBalance: CGFloat = 0.25
 /// images — they were not produced by `windowWithShadow`, so their padding does not follow our
 /// arithmetic, and the fill landed offset from the picture.
 private enum PictureShape {
-    private static var cache: (id: ObjectIdentifier, mask: CGImage?)? = nil
+    // Keyed on identity *and* geometry: a released CGImage's address can be reused by the next one,
+    // and an identity-only key would then hand back the previous document's mask.
+    private static var cache: (id: ObjectIdentifier, w: Int, h: Int, mask: CGImage?)? = nil
 
-    /// Half scale, so the scan costs a quarter; nil when the image is fully opaque, in which case
-    /// the document already *is* the picture and no clip is needed.
+    /// Full resolution; nil when the image is fully opaque, in which case the document already *is*
+    /// the picture and no clip is needed.
     static func mask(of image: CGImage) -> CGImage? {
         let id = ObjectIdentifier(image)
-        if let c = cache, c.id == id { return c.mask }
+        if let c = cache, c.id == id, c.w == image.width, c.h == image.height { return c.mask }
         let built = build(image)
-        cache = (id, built)
+        cache = (id, image.width, image.height, built)
         return built
     }
 
@@ -550,7 +552,7 @@ private enum PictureShape {
 
 /// The document being annotated, so `renderShape` can tell the picture from its shadow padding.
 /// Set by the canvas (live) and by the export path; there is only ever one editor open at a time.
-private var currentDocumentImage: CGImage!
+private var currentDocumentImage: CGImage?
 private var currentDocumentSize: CGSize = .zero
 /// True when the document the editor works on is a *finished* image — i.e. it already has the
 /// drop shadow's transparent padding baked in (an import that came with one). Captures are raw, so
@@ -696,8 +698,8 @@ private func renderShape(_ shape: AnnotationShape) {
                                         radius: continuousRadius(for: shape.rect),
                                         exponent: 3.5))
         cg.saveGState()
-        if currentDocumentIsDecorated,
-           let pictureMask = PictureShape.mask(of: currentDocumentImage) {
+        if currentDocumentIsDecorated, let picture = currentDocumentImage,
+           let pictureMask = PictureShape.mask(of: picture) {
             cg.clip(to: document, mask: pictureMask)
         }
         cg.addPath(mask)
@@ -1108,6 +1110,7 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         toolbar.onFontSize = { [weak self] s in self?.canvas.setLiveTextSize(s) }
         toolbar.onLineStyle = { [weak self] dashed in self?.canvas.setLineDashed(dashed) }
         toolbar.onSpotlightOpacity = { [weak self] v in self?.canvas.setSpotlightOpacity(v) }
+        toolbar.onSpotlightOpacityEnd = { [weak self] in self?.canvas.endSpotlightOpacityEdit() }
         toolbar.onSave = { [weak self] in self?.save() }
         canvas.onCurrentWidthChanged = { [weak self] width in self?.toolbar.setWidthDisplay(width) }
         canvas.onActiveTool = { [weak self] kind in
@@ -1526,6 +1529,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         currentKind = kind
         strokeColor = colorFor(kind)
         strokeWidth = defaultWidth(for: kind)
+        spotlightOpacityEditPushed = false
         if kind == .spotlight, let i = selectedIndex, i < shapes.count,
            shapes[i].kind == .spotlight {
             spotlightOpacity = shapes[i].opacity
@@ -1615,14 +1619,28 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     /// Dim strength for a new spotlight, mirrored by the toolbar slider.
     var spotlightOpacity: CGFloat = 0.5
 
+    /// Set while a slider drag is in progress, so the whole drag is one undo step. The slider is
+    /// continuous, so without this a single drag would push dozens of snapshots — the history holds
+    /// 60 and a drag can reach that on its own, wiping the user's earlier edits.
+    private var spotlightOpacityEditPushed = false
+
     func setSpotlightOpacity(_ value: CGFloat) {
         let clamped = min(max(value, 0.05), 0.95)
         spotlightOpacity = clamped
-        if let i = selectedIndex, i < shapes.count, shapes[i].kind == .spotlight {
-            pushState()
+        if let i = selectedIndex, i < shapes.count, shapes[i].kind == .spotlight,
+           abs(shapes[i].opacity - clamped) > 0.0005 {
+            if !spotlightOpacityEditPushed {
+                pushState()
+                spotlightOpacityEditPushed = true
+            }
             shapes[i].opacity = clamped
             needsDisplay = true
         }
+    }
+
+    /// Called when the slider drag ends, so the next drag starts a new undo step.
+    func endSpotlightOpacityEdit() {
+        spotlightOpacityEditPushed = false
     }
 
     func setCurrentWidth(_ width: CGFloat) {
@@ -1985,6 +2003,17 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     }
 }
 
+/// An NSSlider that also reports the end of a drag. A continuous slider's action fires many times
+/// per drag, which is what a live preview wants, but there is no other signal for "the drag is
+/// over" — and that is where an undo step should end.
+private final class DragEndSlider: NSSlider {
+    var onDragEnd: (() -> Void)?
+    override func mouseUp(with event: NSEvent) {
+        super.mouseUp(with: event)
+        onDragEnd?()
+    }
+}
+
 /// Top toolbar.
 final class ToolbarView: NSView {
     var onSelectTool: ((AnnotationShape.Kind) -> Void)?
@@ -1993,6 +2022,7 @@ final class ToolbarView: NSView {
     var onFontSize: ((CGFloat) -> Void)?
     var onLineStyle: ((Bool) -> Void)?
     var onSpotlightOpacity: ((CGFloat) -> Void)?
+    var onSpotlightOpacityEnd: (() -> Void)?
     var onSave: (() -> Void)?
     var onPanelColorSeed: (() -> NSColor)?
 
@@ -2180,8 +2210,9 @@ final class ToolbarView: NSView {
         stack.addArrangedSubview(dimLabel)
         self.opacityLabel = dimLabel
 
-        let slider = NSSlider(value: 0.5, minValue: 0.05, maxValue: 0.95,
-                              target: self, action: #selector(spotlightOpacityChanged(_:)))
+        let slider = DragEndSlider(value: 0.5, minValue: 0.05, maxValue: 0.95,
+                                  target: self, action: #selector(spotlightOpacityChanged(_:)))
+        slider.onDragEnd = { [weak self] in self?.onSpotlightOpacityEnd?() }
         slider.controlSize = .small
         slider.isContinuous = true          // live feedback while dragging
         slider.isHidden = true
