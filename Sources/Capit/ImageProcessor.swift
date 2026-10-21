@@ -1,8 +1,6 @@
-import AppKit
 import CoreGraphics
 
 /// Post-processing applied to captured images before saving.
-/// Uses AppKit (NSBitmapImageRep + NSImage) so orientation matches the code path
 /// that already produces correctly-oriented PNGs — avoiding CGContext flip bugs.
 enum ImageProcessor {
 
@@ -18,31 +16,21 @@ enum ImageProcessor {
         let w = image.width, h = image.height
         let shorter = CGFloat(min(w, h))
         let radius = max(minCornerRadiusPx, shorter * radiusRatio)
-
-        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
-                                         pixelsWide: w, pixelsHigh: h,
-                                         bitsPerSample: 8, samplesPerPixel: 4,
-                                         hasAlpha: true, isPlanar: false,
-                                         colorSpaceName: .deviceRGB,
-                                         bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
-        guard let gc = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = gc
-        gc.imageInterpolation = .high
-        gc.shouldAntialias = true
-
-        let rect = NSRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h))
-        // Same hazard: the clipped-away corners must be transparent, not whatever was in the buffer.
-        gc.cgContext.clear(rect)
-        let clip = SquirclePath.path(in: rect, radius: radius, exponent: exponent)
-        clip.addClip()
-
-        let nsImage = NSImage(cgImage: image, size: rect.size)
-        nsImage.draw(in: rect)
-
-        gc.flushGraphics()
-        NSGraphicsContext.restoreGraphicsState()
-        return rep.cgImage
+        // CoreGraphics only, deliberately: this runs on a background task (the capture path) and
+        // AppKit drawing is not safe there. Verified byte-identical to the NSImage/NSBitmapImageRep
+        // version it replaced, anti-aliased corner edges included.
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return nil
+        }
+        let rect = CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h))
+        ctx.clear(rect)
+        ctx.interpolationQuality = .high
+        ctx.addPath(SquirclePath.cgPath(in: rect, radius: radius, exponent: exponent))
+        ctx.clip()
+        ctx.draw(image, in: rect)
+        return ctx.makeImage()
     }
 
     /// Heuristic: true when `image` already looks like a rounded-corner + shadowed "card"
@@ -118,37 +106,27 @@ enum ImageProcessor {
         let outW = cw + sidePad * 2
         let outH = ch + topPad + bottomPad
 
-        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
-                                         pixelsWide: outW, pixelsHigh: outH,
-                                         bitsPerSample: 8, samplesPerPixel: 4,
-                                         hasAlpha: true, isPlanar: false,
-                                         colorSpaceName: .deviceRGB,
-                                         bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
-        guard let gc = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        // CoreGraphics only (see applyingRoundedCorners). The clear matters: the far corners of the
+        // shadow padding are never painted, so they must start transparent rather than hold whatever
+        // the buffer happened to contain.
+        guard let ctx = CGContext(data: nil, width: outW, height: outH, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return nil
+        }
+        ctx.clear(CGRect(x: 0, y: 0, width: outW, height: outH))
+        ctx.interpolationQuality = .high
 
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = gc
-        gc.imageInterpolation = .high
-        // The rep's backing memory is not guaranteed to be zeroed. Without this, the far corners of
-        // the shadow padding — which nothing paints — hold whatever was in the buffer, and they end
-        // up in the exported PNG.
-        gc.cgContext.clear(CGRect(x: 0, y: 0, width: outW, height: outH))
-
-        let contentRect = NSRect(x: CGFloat(sidePad), y: CGFloat(bottomPad),
+        let contentRect = CGRect(x: CGFloat(sidePad), y: CGFloat(bottomPad),
                                  width: CGFloat(cw), height: CGFloat(ch))
-
-        let shadow = NSShadow()
-        shadow.shadowColor = NSColor.black.withAlphaComponent(opacity)
-        shadow.shadowBlurRadius = blur
-        shadow.shadowOffset = NSSize(width: 0, height: -blur * 0.55)
-        shadow.set()
-
-        let nsImage = NSImage(cgImage: content, size: contentRect.size)
-        nsImage.draw(in: contentRect)
-
-        gc.flushGraphics()
-        NSGraphicsContext.restoreGraphicsState()
-        return rep.cgImage
+        ctx.saveGState()
+        // Same numbers as the NSShadow it replaced: blurred shadow, offset down, 56% black.
+        ctx.setShadow(offset: CGSize(width: 0, height: -blur * 0.55), blur: blur,
+                      color: CGColor(colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                     components: [0, 0, 0, opacity])!)
+        ctx.draw(content, in: contentRect)
+        ctx.restoreGState()
+        return ctx.makeImage()
     }
 
     /// Small preview thumbnail (never upscales). The full-resolution PNG already lives on disk,
