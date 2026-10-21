@@ -11,8 +11,7 @@ enum ImageProcessor {
 
     /// Continuous-corner (squircle) rounding, in the image's own orientation.
     static func applyingRoundedCorners(to image: CGImage,
-                                       radiusRatio: CGFloat = cornerRadiusRatio,
-                                       exponent: CGFloat = cornerExponent) -> CGImage? {
+                                       radiusRatio: CGFloat = cornerRadiusRatio) -> CGImage? {
         let w = image.width, h = image.height
         let shorter = CGFloat(min(w, h))
         let radius = max(minCornerRadiusPx, shorter * radiusRatio)
@@ -27,7 +26,7 @@ enum ImageProcessor {
         let rect = CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h))
         ctx.clear(rect)
         ctx.interpolationQuality = .high
-        ctx.addPath(SquirclePath.cgPath(in: rect, radius: radius, exponent: exponent))
+        ctx.addPath(SquirclePath.cgPath(in: rect, radius: radius, exponent: cornerExponent))
         ctx.clip()
         ctx.draw(image, in: rect)
         return ctx.makeImage()
@@ -94,11 +93,10 @@ enum ImageProcessor {
         return windowWithShadow(content: rounded) ?? rounded
     }
 
-    static func windowWithShadow(content: CGImage,
-                                 multiplier: CGFloat = 1.0) -> CGImage? {
+    static func windowWithShadow(content: CGImage) -> CGImage? {
         let cw = content.width, ch = content.height
         let W = CGFloat(cw)
-        let blur = max(34.0, min(170.0, W * 0.038 * multiplier))
+        let blur = max(34.0, min(170.0, W * 0.038))
         let opacity: CGFloat = 0.56
         let sidePad = Int(blur * 1.5)
         let topPad = Int(blur * 2.0)

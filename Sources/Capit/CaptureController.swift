@@ -156,7 +156,9 @@ final class CaptureController {
             playSystemScreenshotSound()
             // A native window capture already carries corners and shadow; it is left alone and the
             // flag tells the editor not to decorate it again on save.
-            let decorated = ImageProcessor.alreadyRoundedOrShadowed(image)
+            let decorated = await Task.detached(priority: .userInitiated) {
+                ImageProcessor.alreadyRoundedOrShadowed(image)
+            }.value
             presentPending(image, screen: screen, finalURL: CapturePipeline.desktopURL(),
                            needsFinishing: !decorated)
         } catch {
@@ -274,7 +276,7 @@ final class CaptureController {
                         try CapturePipeline.atomicReplace(productURL, destination)
                         // The clipboard already holds this image from capture time; rewriting it
                         // here would silently clobber whatever the user copied in the meantime.
-                        NSLog("[Capit] 已保存到桌面: \(finalURL.path)")
+                        NSLog("[Capit] 已保存到桌面: \(destination.path)")
                     } catch {
                         await MainActor.run { self?.presentError(error) }
                     }

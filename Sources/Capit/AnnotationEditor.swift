@@ -8,6 +8,10 @@ private enum SaveOutcome {
     case failure(String)
 }
 
+/// Tools that carry a dash style. One definition: the canvas and the toolbar each had their own copy,
+/// so adding a kind would have made "can set dashes" and "shows the dash control" disagree.
+let outlineKinds: Set<AnnotationShape.Kind> = [.rect, .ellipse, .arrow, .line]
+
 /// Tools whose annotations carry a stroke width (and show the width popup).
 private let strokeWidthKinds: Set<AnnotationShape.Kind> =
     [.rect, .ellipse, .arrow, .line, .highlighter]
@@ -945,15 +949,15 @@ final class AnnotationHolder {
 }
 
 /// A vector annotation shape drawn on the canvas.
-struct AnnotationShape {    enum Kind: String, CaseIterable {
+struct AnnotationShape {    enum Kind {
         case rect, ellipse, arrow, line, highlighter, text, number, mosaic, spotlight
     }
     var kind: Kind
     var start: CGPoint
     var end: CGPoint
     var color: NSColor = .yellow
-    var strokeWidth: CGFloat = 12
-    var opacity: CGFloat = 0.45
+    var strokeWidth: CGFloat = 2
+    var opacity: CGFloat = 1
     var fontSize: CGFloat = 18
     var text: String = ""
     var dashed = false
@@ -1383,8 +1387,6 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private var moveEnd0: CGPoint = .zero
     private var movePoints0: [CGPoint] = []
     private var movePushed = false
-    private let moveKinds: Set<AnnotationShape.Kind> =
-        [.rect, .ellipse, .line, .arrow, .number, .text, .highlighter, .mosaic, .spotlight]
     /// Upper bound on captured freehand samples; past this the path is decimated
     /// instead of dropping the stroke.
     private static let highlighterMaxPoints = 4096
@@ -1444,8 +1446,6 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private var pendingTextStart: CGPoint = .zero
     private var pendingTextColor: NSColor = .black
     private var swallowCommitClick = false
-
-    var isEditingText: Bool { textField != nil }
 
     func beginText(at p: CGPoint, editingIndex: Int?) {
         commitTextEditor()
@@ -1554,7 +1554,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         }
     }
     var strokeColor: NSColor = .red
-    var strokeWidth: CGFloat = 3
+    var strokeWidth: CGFloat = 2
     private var colorEditHistoryPushed = false
 
     private var colorByKind: [AnnotationShape.Kind: NSColor] = [
@@ -1562,7 +1562,6 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         .mosaic: NSColor.black
     ]
     private static let defaultColor: NSColor = .red
-    private static let outlineKinds: Set<AnnotationShape.Kind> = [.rect, .ellipse, .arrow, .line]
 
     private func colorFor(_ kind: AnnotationShape.Kind) -> NSColor {
         colorByKind[kind] ?? Self.defaultColor
@@ -1650,7 +1649,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     func setLineDashed(_ dashed: Bool) {
         lineDashed = dashed
         if let i = selectedIndex, i < shapes.count,
-           Self.outlineKinds.contains(shapes[i].kind), shapes[i].dashed != dashed {
+           outlineKinds.contains(shapes[i].kind), shapes[i].dashed != dashed {
             pushState()
             shapes[i].dashed = dashed
             needsDisplay = true
@@ -1661,7 +1660,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     /// The outline-style value to show follows a selected shape when one exists.
     var effectiveLineDashed: Bool {
         if let i = selectedIndex, i < shapes.count,
-           Self.outlineKinds.contains(shapes[i].kind) {
+           outlineKinds.contains(shapes[i].kind) {
             return shapes[i].dashed
         }
         return lineDashed
@@ -1906,14 +1905,13 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                 selectTool(shapes[idx].kind)
                 selectionChanged()
                 needsDisplay = true
-                if moveKinds.contains(shapes[idx].kind) {
-                    moveIndex = idx
-                    moveDown = p
-                    moveStart0 = shapes[idx].start
-                    moveEnd0 = shapes[idx].end
-                    movePoints0 = shapes[idx].points
-                    movePushed = false
-                }
+                // Every kind is movable, so this is unconditional (the old set listed all of them).
+                moveIndex = idx
+                moveDown = p
+                moveStart0 = shapes[idx].start
+                moveEnd0 = shapes[idx].end
+                movePoints0 = shapes[idx].points
+                movePushed = false
                 return
             }
         }
@@ -1951,7 +1949,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             var shape = AnnotationShape(kind: currentKind, start: p, end: p,
                                         color: color, strokeWidth: strokeWidth,
                                         opacity: currentKind == .spotlight ? spotlightOpacity : 1)
-            if Self.outlineKinds.contains(currentKind) { shape.dashed = lineDashed }
+            if outlineKinds.contains(currentKind) { shape.dashed = lineDashed }
             if currentKind == .highlighter {
                 // Freehand by default. The samples are spline-smoothed, so the stroke reads as
                 // a marker rather than as pointer input; ⇧ constrains it to the straight
@@ -2090,7 +2088,6 @@ final class ToolbarView: NSView {
     private var widthPop: NSPopUpButton?
     private var colorButton: NSButton?
 
-    private static let outlineKinds: Set<AnnotationShape.Kind> = [.rect, .ellipse, .arrow, .line]
 
     /// Toolbar icon for the spotlight: a hatched ring around an empty centre — "everything around
     /// this is covered, this is not". SF Symbols has no hatched variant, so it is drawn. Template
@@ -2154,7 +2151,7 @@ final class ToolbarView: NSView {
     }
 
     func configureStyleControls(tool: AnnotationShape.Kind, lineDashed: Bool) {
-        let showLine = Self.outlineKinds.contains(tool)
+        let showLine = outlineKinds.contains(tool)
         let showWidth = strokeWidthKinds.contains(tool)
         linePop?.isHidden = !showLine
         widthPop?.isHidden = !showWidth
@@ -2371,7 +2368,7 @@ final class ToolbarView: NSView {
     }
 
     @objc private func widthChanged(_ sender: NSPopUpButton) {
-        onWidth?(CGFloat(sender.titleOfSelectedItem.flatMap(Double.init) ?? 3))
+        onWidth?(CGFloat(sender.titleOfSelectedItem.flatMap(Double.init) ?? 2))
     }
     @objc private func fontSizeChanged(_ sender: NSPopUpButton) {
         onFontSize?(CGFloat(sender.titleOfSelectedItem.flatMap(Double.init) ?? 20))

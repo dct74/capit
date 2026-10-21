@@ -133,21 +133,17 @@ enum CapturePipeline {
 
     /// Metadata worth carrying from a file being re-saved: the general dictionaries, minus anything
     /// that describes the old container or an orientation the pixels no longer need.
-    static func metadata(from url: URL,
-                         forOutputType type: CFString = UTType.png.identifier as CFString) -> [CFString: Any] {
+    static func metadata(from url: URL) -> [CFString: Any] {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
               let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else {
             return [:]
         }
-        let outputIsPNG = type == (UTType.png.identifier as CFString)
         var out: [CFString: Any] = [:]
         for (key, value) in props {
             if key == kCGImagePropertyOrientation { continue }
-            if outputIsPNG,
-               key == kCGImagePropertyJFIFDictionary || key == kCGImagePropertyHEICSDictionary
-               || key == kCGImagePropertyPNGDictionary {
-                continue                       // container-specific to the source
-            }
+            // Container-specific dictionaries describe the source file, not the PNG being written.
+            if key == kCGImagePropertyJFIFDictionary || key == kCGImagePropertyHEICSDictionary
+                || key == kCGImagePropertyPNGDictionary { continue }
             out[key] = value
         }
         return out
