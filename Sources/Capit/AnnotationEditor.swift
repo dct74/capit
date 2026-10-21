@@ -1197,6 +1197,13 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
             presentSaveFailure(message: "无法创建图像缓冲区。")
             return
         }
+        // Clear first. `UnsafeMutableRawPointer.allocate` returns uninitialised memory, and drawing
+        // with source-over leaves it visible wherever the source is not fully opaque. A window
+        // capture is exactly that case — its drop shadow is semi-transparent and its outer area is
+        // transparent — so the leftovers showed up as coloured blocks in the shadow of the saved
+        // file. Region and full-screen captures are opaque everywhere, which is why only annotated
+        // window captures looked wrong.
+        ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
 
         NSGraphicsContext.saveGraphicsState()

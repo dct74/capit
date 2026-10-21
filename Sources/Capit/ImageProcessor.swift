@@ -32,6 +32,8 @@ enum ImageProcessor {
         gc.shouldAntialias = true
 
         let rect = NSRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h))
+        // Same hazard: the clipped-away corners must be transparent, not whatever was in the buffer.
+        gc.cgContext.clear(rect)
         let clip = SquirclePath.path(in: rect, radius: radius, exponent: exponent)
         clip.addClip()
 
@@ -127,6 +129,10 @@ enum ImageProcessor {
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = gc
         gc.imageInterpolation = .high
+        // The rep's backing memory is not guaranteed to be zeroed. Without this, the far corners of
+        // the shadow padding — which nothing paints — hold whatever was in the buffer, and they end
+        // up in the exported PNG.
+        gc.cgContext.clear(CGRect(x: 0, y: 0, width: outW, height: outH))
 
         let contentRect = NSRect(x: CGFloat(sidePad), y: CGFloat(bottomPad),
                                  width: CGFloat(cw), height: CGFloat(ch))
