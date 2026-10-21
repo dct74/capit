@@ -578,6 +578,17 @@ private func continuousRadius(for r: CGRect) -> CGFloat {
     max(4, min(r.width, r.height) * 0.2)
 }
 
+/// The box a text annotation occupies, used by the selection indicator, single-click hit testing and
+/// double-click editing. Three separate expressions had drifted apart (one ignored the text height,
+/// another padded by 8 more points), so the same shape reported three different rectangles.
+private func textShapeBounds(_ shape: AnnotationShape) -> CGRect {
+    let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: shape.fontSize)]
+    let size = NSAttributedString(string: shape.text, attributes: attrs).size()
+    return CGRect(x: shape.start.x - 4, y: shape.start.y - 4,
+                  width: max(size.width + 8, 20),
+                  height: max(size.height + 8, shape.fontSize + 6))
+}
+
 /// Draws one annotation into the *current* NSGraphicsContext, in document (view)
 /// coordinates. Shared by the live canvas and the export renderer.
 private func renderShape(_ shape: AnnotationShape) {
@@ -1416,6 +1427,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     /// per press.
     func nudgeSelected(dx: CGFloat, dy: CGFloat) {
         guard let i = selectedIndex, i < shapes.count else { return }
+        colorEditHistoryPushed = false
         pushState()
         shapes[i].start.x += dx
         shapes[i].start.y += dy
@@ -1561,6 +1573,12 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         currentKind = kind
         strokeColor = colorFor(kind)
         strokeWidth = defaultWidth(for: kind)
+        // Selecting a shape shows *its* width and dash, and keeps them as the default for the next
+        // one — resetting to 2 here silently threw away a width the user had just picked.
+        if let i = selectedIndex, i < shapes.count, shapes[i].kind == kind {
+            strokeWidth = shapes[i].strokeWidth
+            lineDashed = shapes[i].dashed
+        }
         spotlightOpacityEditPushed = false
         if kind == .spotlight, let i = selectedIndex, i < shapes.count,
            shapes[i].kind == .spotlight {
@@ -1632,11 +1650,12 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     func setLineDashed(_ dashed: Bool) {
         lineDashed = dashed
         if let i = selectedIndex, i < shapes.count,
-           Self.outlineKinds.contains(shapes[i].kind) {
+           Self.outlineKinds.contains(shapes[i].kind), shapes[i].dashed != dashed {
             pushState()
             shapes[i].dashed = dashed
             needsDisplay = true
         }
+        colorEditHistoryPushed = false
     }
 
     /// The outline-style value to show follows a selected shape when one exists.
@@ -1678,12 +1697,13 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     func setCurrentWidth(_ width: CGFloat) {
         strokeWidth = width
         if let i = selectedIndex, i < shapes.count,
-           strokeWidthKinds.contains(shapes[i].kind) {
+           strokeWidthKinds.contains(shapes[i].kind), abs(shapes[i].strokeWidth - width) > 0.001 {
             pushState()
             shapes[i].strokeWidth = width
             notifyWidthDisplay()
             needsDisplay = true
         }
+        colorEditHistoryPushed = false
         refreshCursorRects()
     }
 
@@ -1799,10 +1819,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             rect = CGRect(x: shape.start.x - d / 2, y: shape.start.y - d / 2,
                           width: d, height: d)
         } else if shape.kind == .text {
-            let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: shape.fontSize)]
-            let sz = NSAttributedString(string: shape.text, attributes: attrs).size()
-            rect = CGRect(x: shape.start.x - 4, y: shape.start.y - 4,
-                          width: max(sz.width + 8, 20), height: max(sz.height + 8, shape.fontSize + 6))
+            rect = textShapeBounds(shape)
         } else {
             rect = shape.rect.insetBy(dx: -6, dy: -6)
         }
@@ -1823,12 +1840,11 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             case .line, .arrow, .highlighter:
                 hit = dist(p, to: s) <= max(6, s.strokeWidth / 2 + 3)
             case .text:
-                let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: s.fontSize)]
-                let sz = NSAttributedString(string: s.text, attributes: attrs).size()
-                hit = CGRect(x: s.start.x - 4, y: s.start.y - 4,
-                             width: max(sz.width + 8, 20), height: s.fontSize + 8).contains(p)
+                hit = textShapeBounds(s).contains(p)
             case .number:
-                hit = hypot(p.x - s.start.x, p.y - s.start.y) <= s.fontSize * 1.1
+                // The badge is drawn with radius 0.7 x fontSize; 1.1 made the clickable area 57%
+                // wider than the visible circle, stealing clicks from shapes underneath.
+                hit = hypot(p.x - s.start.x, p.y - s.start.y) <= s.fontSize * 0.7 + 3
             }
             if hit { return i }
         }
@@ -1857,12 +1873,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private func textShapeIndex(at p: CGPoint) -> Int? {
         for i in shapes.indices.reversed() where shapes[i].kind == .text {
             let s = shapes[i]
-            let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: s.fontSize)]
-            let size = NSAttributedString(string: s.text, attributes: attrs).size()
-            let w = max(size.width + 8, 20), h = max(size.height + 8, s.fontSize + 6)
-            if CGRect(x: s.start.x - 4, y: s.start.y - 4, width: w + 8, height: h + 8).contains(p) {
-                return i
-            }
+            if textShapeBounds(s).insetBy(dx: -4, dy: -4).contains(p) { return i }
         }
         return nil
     }
