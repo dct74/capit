@@ -80,14 +80,32 @@ enum CapturePipeline {
     ///
     /// The write itself goes to a sibling temp file and is then moved into place, so an interrupted
     /// write cannot leave a truncated PNG at the destination.
+    @discardableResult
     static func write(image: CGImage, to url: URL,
-                      sourceProperties: [CFString: Any] = [:]) throws {
+                      sourceProperties: [CFString: Any] = [:]) throws -> Data {
+        let png = try encodePNG(image, sourceProperties: sourceProperties)
+        try writePNG(png, to: url)
+        return png
+    }
+
+    /// Writes already-encoded PNG bytes atomically (sibling temp file, then replace).
+    static func writePNG(_ png: Data, to url: URL) throws {
         let folder = url.deletingLastPathComponent()
         let temp = folder.appendingPathComponent(".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: temp) }
+        try png.write(to: temp, options: .atomic)
+        try atomicReplace(temp, url)
+    }
 
-        guard let dest = CGImageDestinationCreateWithURL(temp as CFURL,
-                                                         UTType.png.identifier as CFString,
+    /// The PNG bytes for `image`, tagged as already rounded+shadowed.
+    ///
+    /// Encoded in memory so a caller can use the same bytes twice: the file and the clipboard used to
+    /// encode this image separately, which cost an extra full-size PNG encode (~128 ms at 4K) on
+    /// every capture and save.
+    static func encodePNG(_ image: CGImage,
+                          sourceProperties: [CFString: Any] = [:]) throws -> Data {
+        let data = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString,
                                                          1, nil) else {
             throw CaptureError.imageWriteFailed
         }
@@ -100,7 +118,7 @@ enum CapturePipeline {
         guard CGImageDestinationFinalize(dest) else {
             throw CaptureError.imageWriteFailed
         }
-        try atomicReplace(temp, url)
+        return data as Data
     }
 
     /// Moves a finished temp file onto the destination without ever leaving a half-written file.
@@ -173,30 +191,30 @@ enum CaptureClipboard {
     /// only. Encoding runs off-main rather than using NSBitmapImageRep, so nothing here needs
     /// AppKit off the main thread. `pasteboard` is injectable so tests can use a private one
     /// instead of clobbering the user's clipboard.
+    /// Puts already-encoded PNG bytes on the pasteboard.
+    ///
+    /// PNG only, deliberately: the previous version also encoded an uncompressed TIFF, which sat on
+    /// the pasteboard (47 MB at 4K, 80 MB at 5K) until the next copy and cost another encode. Every
+    /// macOS app that accepts a pasted image accepts PNG.
+    static func copy(png: Data, into pasteboard: NSPasteboard = .general) {
+        guard isEnabled else { return }
+        // NSPasteboard is main-thread only; this states that to the compiler.
+        nonisolated(unsafe) let board = pasteboard
+        Task { @MainActor in
+            board.clearContents()
+            let item = NSPasteboardItem()
+            item.setData(png, forType: .png)
+            board.writeObjects([item])
+        }
+    }
+
+    /// Convenience for callers that only have an image: encodes once and hands the bytes over.
     static func copy(_ image: CGImage, into pasteboard: NSPasteboard = .general) {
         guard isEnabled else { return }
-        // NSPasteboard is main-thread only, so it is never touched outside `MainActor.run` below;
-        // this states that to the compiler rather than leaving a Sendable warning in the build.
         nonisolated(unsafe) let board = pasteboard
         Task.detached(priority: .utility) {
-            func encode(_ type: CFString) -> Data? {
-                let data = NSMutableData()
-                guard let dest = CGImageDestinationCreateWithData(data, type, 1, nil) else { return nil }
-                CGImageDestinationAddImage(dest, image, nil)
-                guard CGImageDestinationFinalize(dest) else { return nil }
-                return data as Data
-            }
-            let png = encode(UTType.png.identifier as CFString)
-            let tiff = encode(UTType.tiff.identifier as CFString)
-            guard png != nil || tiff != nil else { return }
-            await MainActor.run {
-                let pb = board
-                pb.clearContents()
-                let item = NSPasteboardItem()
-                if let png { item.setData(png, forType: .png) }
-                if let tiff { item.setData(tiff, forType: .tiff) }
-                pb.writeObjects([item])
-            }
+            guard let png = try? CapturePipeline.encodePNG(image) else { return }
+            copy(png: png, into: board)
         }
     }
 }

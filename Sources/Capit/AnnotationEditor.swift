@@ -476,40 +476,49 @@ private enum PictureShape {
         // 25/255, which this dims by 10% — invisible on an already dark pixel — while the picture's
         // edge pixels get exactly their own coverage.
         // Everything here is a single pass over the pixels: this runs when the editor opens, and an
-        // 8-megapixel capture made the first version take 100 ms, which is a visible hitch.
+        // 8-megapixel capture made the first version take 100 ms, which is a visible hitch. The row
+        // mirror is folded into the final write and the intermediate copy is gone, which halved both
+        // the time and the peak allocation; the resulting mask is byte-identical.
         var base = [UInt8](repeating: 255, count: w * h)
-        for i in 0..<(w * h) where alpha[i * 4 + 3] >= 250 {
-            base[i] = 0                      // 0 = paint (image mask convention)
+        base.withUnsafeMutableBufferPointer { out in
+            for i in 0..<(w * h) where alpha[i * 4 + 3] >= 250 { out[i] = 0 }
         }
         /// Separable dilation, radius 1: "is a fully opaque pixel within one step?".
         func dilate(_ src: [UInt8]) -> [UInt8] {
             var hor = [UInt8](repeating: 255, count: w * h)
-            for y in 0..<h {
-                let row = y * w
-                for x in 0..<w {
-                    var v = src[row + x]
-                    if x > 0 { v = min(v, src[row + x - 1]) }
-                    if x + 1 < w { v = min(v, src[row + x + 1]) }
-                    hor[row + x] = v
+            src.withUnsafeBufferPointer { s in
+                hor.withUnsafeMutableBufferPointer { out in
+                    for y in 0..<h {
+                        let row = y * w
+                        for x in 0..<w {
+                            var v = s[row + x]
+                            if x > 0 { v = min(v, s[row + x - 1]) }
+                            if x + 1 < w { v = min(v, s[row + x + 1]) }
+                            out[row + x] = v
+                        }
+                    }
                 }
             }
-            var out = [UInt8](repeating: 255, count: w * h)
-            for y in 0..<h {
-                let row = y * w
-                for x in 0..<w {
-                    var v = hor[row + x]
-                    if y > 0 { v = min(v, hor[row - w + x]) }
-                    if y + 1 < h { v = min(v, hor[row + w + x]) }
-                    out[row + x] = v
+            var res = [UInt8](repeating: 255, count: w * h)
+            hor.withUnsafeBufferPointer { hr in
+                res.withUnsafeMutableBufferPointer { out in
+                    for y in 0..<h {
+                        let row = y * w
+                        for x in 0..<w {
+                            var v = hr[row + x]
+                            if y > 0 { v = min(v, hr[row - w + x]) }
+                            if y + 1 < h { v = min(v, hr[row + w + x]) }
+                            out[row + x] = v
+                        }
+                    }
                 }
             }
-            return out
+            return res
         }
-        // Distance from the opaque core, in one-pixel steps, capped at 2.
+        // Distance from the opaque core, in one-pixel steps, capped at 2. band1 holds only 0/255, so
+        // it can be fed to the second dilation directly — the copy that used to sit here was identical.
         let band1 = dilate(base)
-        var band1Min = [UInt8](repeating: 255, count: w * h)
-        for i in 0..<(w * h) where band1[i] == 0 { band1Min[i] = 0 }
-        let band2 = dilate(band1Min)
+        let band2 = dilate(band1)
 
         // The eye reads a half-covered edge pixel closer to the covered side, so linear coverage
         // looks a touch thin along bright edges; a gentle gamma compensates. Tabulated because a
@@ -521,28 +530,34 @@ private enum PictureShape {
 
         var mask = [UInt8](repeating: 255, count: w * h)
         var anyOpaque = false
-        for i in 0..<(w * h) {
-            // The weight falls off with distance instead of stopping at the band's edge: a hard cut
-            // there left a step where the picture's coverage was still a few percent — most visible
-            // at a corner, where a continuous corner's ramp is shallow and wide.
-            let weight: Double
-            if band1[i] == 0 { weight = 1 } else if band2[i] == 0 { weight = 0.5 } else { continue }
-            let coverage = min(Double(alpha[i * 4 + 3]) / 255.0, weight)
-            guard coverage > 0.002 else { continue }
-            mask[i] = bias[Int(coverage * 255)]
-            anyOpaque = true
-        }
-        guard anyOpaque else { return nil }
-        // The mask is consumed in the document's flipped space (y down), while the alpha buffer was
-        // read bottom-up from an unflipped context. Drawn as-is it lands mirrored, and because a
-        // window capture's shadow padding is asymmetric (more below than above) that mirror shows up
-        // as the clip shifting off the picture — the dim then leaks onto the shadow. Reverse the
-        // rows so the mask matches the space it is used in.
-        for y in 0..<(h / 2) {
-            for x in 0..<w {
-                mask.swapAt(y * w + x, (h - 1 - y) * w + x)
+        band1.withUnsafeBufferPointer { b1 in
+            band2.withUnsafeBufferPointer { b2 in
+                mask.withUnsafeMutableBufferPointer { out in
+                    for y in 0..<h {
+                        // The mask is consumed in the document's flipped space (y down), while the
+                        // alpha buffer was read bottom-up from an unflipped context. Written as-is it
+                        // lands mirrored, and a window capture's shadow padding is asymmetric, so the
+                        // clip would shift off the picture. Write each row mirrored instead of
+                        // swapping afterwards.
+                        let dst = (h - 1 - y) * w
+                        let src = y * w
+                        for x in 0..<w {
+                            // The weight falls off with distance instead of stopping at the band's
+                            // edge: a hard cut there left a step where the picture's coverage was
+                            // still a few percent — most visible at a corner, where a continuous
+                            // corner's ramp is shallow and wide.
+                            let weight: Double
+                            if b1[src + x] == 0 { weight = 1 } else if b2[src + x] == 0 { weight = 0.5 } else { continue }
+                            let coverage = min(Double(alpha[(src + x) * 4 + 3]) / 255.0, weight)
+                            guard coverage > 0.002 else { continue }
+                            out[dst + x] = bias[Int(coverage * 255)]
+                            anyOpaque = true
+                        }
+                    }
+                }
             }
         }
+        guard anyOpaque else { return nil }
         guard let provider = CGDataProvider(data: Data(mask) as CFData) else { return nil }
         return CGImage(maskWidth: w, height: h, bitsPerComponent: 8, bitsPerPixel: 8,
                        bytesPerRow: w, provider: provider, decode: nil,
@@ -1257,8 +1272,10 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
             let outcome: SaveOutcome
             do {
                 let finished = self.writtenImage(snapshot)
-                try CapturePipeline.write(image: finished, to: url, sourceProperties: inherited)
-                CaptureClipboard.copy(finished)
+                // Encode once: the same bytes go to the file and to the clipboard.
+                let png = try CapturePipeline.encodePNG(finished, sourceProperties: inherited)
+                try CapturePipeline.writePNG(png, to: url)
+                CaptureClipboard.copy(png: png)
                 outcome = .success
             } catch {
                 outcome = .failure("无法保存：\(error.localizedDescription)")

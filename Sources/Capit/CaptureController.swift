@@ -294,10 +294,13 @@ final class CaptureController {
         CaptureWriter.schedule {
             guard !pending.isCancelled else { return }
             let product = needsFinishing ? ImageProcessor.finished(image, radiusRatio: radiusRatio) : image
-            CaptureClipboard.copy(product)
+            // One PNG encode serves the clipboard and the file (two encodes used to run here).
+            let png = try? CapturePipeline.encodePNG(product)
+            if let png { CaptureClipboard.copy(png: png) }
             guard !pending.isCancelled else { return }   // opened while decorating
             do {
-                try CapturePipeline.write(image: product, to: productURL)
+                if let png { try CapturePipeline.writePNG(png, to: productURL) }
+                else { try CapturePipeline.write(image: product, to: productURL) }
                 // The editor can open while this write is in flight; it deleted the path already, so
                 // finish by removing what we just produced rather than leaving an orphan temp file.
                 if pending.isCancelled { try? FileManager.default.removeItem(at: productURL) }
