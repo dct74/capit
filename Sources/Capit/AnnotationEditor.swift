@@ -1027,24 +1027,30 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    /// Applies corners and shadow when this document still needs them. Every write goes through
+    /// here, so the "decorate or not" decision exists once.
+    private func writtenImage(_ source: CGImage) -> CGImage {
+        needsFinishing ? ImageProcessor.finished(source, radiusRatio: radiusRatio) : source
+    }
+
+    /// Lands the un-annotated capture when the editor is closed — or the app quits — without saving.
+    /// Two callers used to hold verbatim copies of this; one of them had already drifted.
+    ///
+    /// No clipboard write: it already holds this capture's product from the moment the screenshot
+    /// was taken, and writing again would clobber whatever the user has copied since.
+    private func landUnannotatedCapture() {
+        guard !isImported, !didSave, !isSaving, !rawLandingQueued, let url = fileURL else { return }
+        rawLandingQueued = true
+        let snapshot = writtenImage(image)
+        CaptureWriter.schedule { _ = try? CapturePipeline.write(image: snapshot, to: url) }
+    }
+
     func windowWillClose(_ notification: Notification) {
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         toolbar.detachColorPanelTarget()
         // If the user closed without ever saving, land the (un-annotated) capture.
-        if !isImported, !didSave && !isSaving && !rawLandingQueued, let url = fileURL {
-            rawLandingQueued = true
-            let img = image
-            let finish = needsFinishing
-            let ratio = self.radiusRatio
-            // No clipboard write here: it already holds this capture's product from the moment the
-            // screenshot was taken, and writing again would clobber whatever the user has copied
-            // since.
-            CaptureWriter.schedule {
-                let finished = finish ? ImageProcessor.finished(img, radiusRatio: ratio) : img
-                _ = try? CapturePipeline.write(image: finished, to: url)
-            }
-        }
+        landUnannotatedCapture()
         NSApp.setActivationPolicy(.accessory)
         AnnotationHolder.shared.active = nil
         // Resume the idle auto-quit countdown now that no editor is open.
@@ -1054,19 +1060,7 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
     /// Called just before the app quits: queues the capture so a quit during editing
     /// doesn't lose it, and the app can wait for the write via `CaptureWriter`.
     func ensureCapturedBeforeQuit() {
-        if !isImported, !didSave && !isSaving && !rawLandingQueued, let url = fileURL {
-            rawLandingQueued = true
-            let img = image
-            let finish = needsFinishing
-            let ratio = self.radiusRatio
-            // No clipboard write here: it already holds this capture's product from the moment the
-            // screenshot was taken, and writing again would clobber whatever the user has copied
-            // since.
-            CaptureWriter.schedule {
-                let finished = finish ? ImageProcessor.finished(img, radiusRatio: ratio) : img
-                _ = try? CapturePipeline.write(image: finished, to: url)
-            }
-        }
+        landUnannotatedCapture()
     }
 
     func present() {
@@ -1244,8 +1238,6 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         }
         isSaving = true
         let snapshot = out
-        let finish = needsFinishing
-        let ratio = radiusRatio
         // Re-saving an imported file must not throw its EXIF/GPS/IPTC away.
         let inherited: [CFString: Any] = {
             guard isImported, let source = fileURL else { return [:] }
@@ -1257,7 +1249,7 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         CaptureWriter.schedule {
             let outcome: SaveOutcome
             do {
-                let finished = finish ? ImageProcessor.finished(snapshot, radiusRatio: ratio) : snapshot
+                let finished = self.writtenImage(snapshot)
                 try CapturePipeline.write(image: finished, to: url, sourceProperties: inherited)
                 CaptureClipboard.copy(finished)
                 outcome = .success
@@ -1276,11 +1268,16 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
             window.close()
         case .failure(let message):
             presentSaveFailure(message: message)
-            // Never lose the capture: if nothing was written, land the original image.
-            if !didSave {
-                let url = fileURL ?? CapturePipeline.desktopURL()
-                let img = image
-                CaptureWriter.schedule { try? CapturePipeline.write(image: img, to: url) }
+            // Never lose the *capture*: if nothing was written, land the un-annotated image — but
+            // decorated, through the same naming rules, and never into an imported file (which is
+            // still intact on disk; writing here used to put PNG bytes back into a .jpg source).
+            if !didSave, !isImported, let url = fileURL {
+                rawLandingQueued = true          // the close path must not write a second time
+                let snapshot = writtenImage(image)
+                CaptureWriter.schedule {
+                    let destination = CapturePipeline.uniqueOnDisk(url)
+                    _ = try? CapturePipeline.write(image: snapshot, to: destination)
+                }
             }
         }
     }
@@ -1421,9 +1418,9 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         pendingTextStart = p
         pendingTextColor = color
         editingTextIndex = editingIndex
-        if let i = editingIndex, i < shapes.count {
-            shapes[i].opacity = 0
-        }
+        // The shape being edited is skipped while it draws (see draw()), rather than hidden by
+        // setting its opacity to 0: mutating the model mid-edit meant a commit that changed nothing
+        // left the shape invisible, and an undo snapshotted the hidden value.
 
         let field = NSTextField(string: editingIndex.map { shapes[$0].text } ?? "")
         field.font = NSFont.systemFont(ofSize: size)
@@ -1468,11 +1465,13 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                 pushState()
                 shapes.remove(at: i)
                 selectedIndex = nil   // the removed index may now point at the wrong shape
-            } else if shapes[i].text != text || shapes[i].color != pendingTextColor {
-                pushState()
+            } else {
+                if shapes[i].text != text || shapes[i].color != pendingTextColor {
+                    pushState()
+                }
                 shapes[i].text = text
                 shapes[i].color = pendingTextColor
-                shapes[i].opacity = 1
+                shapes[i].opacity = 1      // in case an older snapshot recorded a hidden text
             }
         }
         field.removeFromSuperview()
@@ -1751,7 +1750,8 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         super.draw(dirtyRect)
         baseDraw.draw(in: bounds)
         for (i, shape) in shapes.enumerated() {
-            renderShape(shape)
+            // While a text is being edited the field shows it instead of the shape.
+            if i != editingTextIndex { renderShape(shape) }
             if i == selectedIndex {
                 drawSelectionIndicator(for: shape)
             }
