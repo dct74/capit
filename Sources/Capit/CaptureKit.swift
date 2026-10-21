@@ -76,34 +76,7 @@ enum CaptureKit {
         }
     }
 
-    @available(macOS 14.0, *)
-    static func captureWindow(scWindow: SCWindow, scale: CGFloat) async throws -> CGImage {
-        let filter = SCContentFilter(desktopIndependentWindow: scWindow)
-        let config = SCStreamConfiguration()
-        config.width = max(1, Int(scWindow.frame.width * scale))
-        config.height = max(1, Int(scWindow.frame.height * scale))
-        config.showsCursor = false
-        return try await captureStill(filter: filter, config: config)
-    }
-
-    static func captureWindowNative(id: CGWindowID) async throws -> CGImage {
-        let tmp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("capit_win_\(id)_\(UUID().uuidString).png")
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        proc.arguments = ["-l", "\(id)", "-x", "-o", tmp.path]
-        try proc.run()
-        proc.waitUntilExit()
-        guard FileManager.default.fileExists(atPath: tmp.path),
-              let nsImage = NSImage(contentsOf: tmp),
-              let cg = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            try? FileManager.default.removeItem(at: tmp)
-            throw CaptureError.imageCreationFailed
-        }
-        try? FileManager.default.removeItem(at: tmp)
-        return cg
-    }
-
+    /// Points→pixels factor of the display being captured; 2.0 when it cannot be resolved.
     private static func backingScale(for displayID: CGDirectDisplayID) -> CGFloat {
         let screen = NSScreen.screens.first {
             ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID

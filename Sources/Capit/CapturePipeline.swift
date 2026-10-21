@@ -41,13 +41,6 @@ enum CapturePipeline {
     }
     private static var usedFinalURLs: Set<String> = []
 
-    /// Writes a pending (preview) copy into the temp cache dir.
-    @discardableResult
-    static func saveTemp(image: CGImage, url: URL) throws -> URL {
-        try write(image: image, to: url)
-        return url
-    }
-
     /// Marker written into every PNG Capit exports, so re-importing our own output doesn't
     /// get rounded/shadowed a second time.
     static let processedMarker = "CapitProcessed"
