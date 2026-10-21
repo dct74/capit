@@ -251,12 +251,11 @@ final class CaptureController {
         // taken instead of several seconds later when the preview expires, and it means landing the
         // file is a move rather than another decode/decorate/encode.
         //
-        // The raw capture is kept alongside it only because the editor works on the raw picture
-        // (annotations must not be drawn into the shadow's transparent padding).
-        let rawURL = pendingTempURL()
+        // The editor works on the raw picture (annotations must not be drawn into the shadow's
+        // transparent padding). It gets the in-memory image rather than a temp file, which avoids
+        // encoding a full-size PNG on the main thread just before showing the preview.
         let productURL = pendingTempURL()
         let pending = PendingCapture()
-        _ = try? CapturePipeline.saveTemp(image: image, url: rawURL)
         let thumb = ImageProcessor.thumbnail(from: image) ?? image
         PreviewPresenter.shared.present(image: thumb, screen: screen,
             onExpire: { [weak self] in
@@ -276,7 +275,6 @@ final class CaptureController {
                             try FileManager.default.copyItem(at: productURL, to: finalURL)
                             try? FileManager.default.removeItem(at: productURL)
                         }
-                        try? FileManager.default.removeItem(at: rawURL)
                         // The clipboard already holds this image from capture time; rewriting it
                         // here would silently clobber whatever the user copied in the meantime.
                         NSLog("[Capit] 已保存到桌面: \(finalURL.path)")
@@ -290,7 +288,7 @@ final class CaptureController {
                 // no longer needed, and its writer is told to stand down.
                 pending.cancel()
                 try? FileManager.default.removeItem(at: productURL)
-                self?.openAnnotationWindow(loadingFrom: rawURL, fileURL: finalURL,
+                self?.openAnnotationWindow(image, fileURL: finalURL,
                                            needsFinishing: needsFinishing,
                                            radiusRatio: radiusRatio)
             })
@@ -303,21 +301,21 @@ final class CaptureController {
             guard !pending.isCancelled else { return }   // opened while decorating
             do {
                 try CapturePipeline.write(image: product, to: productURL)
+                // The editor can open while this write is in flight; it deleted the path already, so
+                // finish by removing what we just produced rather than leaving an orphan temp file.
+                if pending.isCancelled { try? FileManager.default.removeItem(at: productURL) }
             } catch {
                 await MainActor.run { self.presentError(error) }
             }
         }
     }
 
-    /// Opens the editor on the pending PNG just landed in the temp cache.
-    private func openAnnotationWindow(loadingFrom tmpURL: URL, fileURL: URL,
+    /// Opens the editor on the capture the preview is showing.
+    private func openAnnotationWindow(_ image: CGImage, fileURL: URL,
                                       needsFinishing: Bool, radiusRatio: CGFloat) {
-        guard let ns = NSImage(contentsOf: tmpURL),
-              let image = ns.cgImage(forProposedRect: nil, context: nil, hints: nil),
-              let editor = AnnotationEditorController(image: image, fileURL: fileURL,
+        guard let editor = AnnotationEditorController(image: image, fileURL: fileURL,
                                                       needsFinishing: needsFinishing,
                                                       radiusRatio: radiusRatio) else { return }
-        try? FileManager.default.removeItem(at: tmpURL)
         editor.present()
     }
 

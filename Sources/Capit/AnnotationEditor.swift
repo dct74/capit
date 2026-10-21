@@ -1459,7 +1459,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
                 pushState()
                 shapes.remove(at: i)
                 selectedIndex = nil   // the removed index may now point at the wrong shape
-            } else {
+            } else if shapes[i].text != text || shapes[i].color != pendingTextColor {
                 pushState()
                 shapes[i].text = text
                 shapes[i].color = pendingTextColor

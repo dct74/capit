@@ -1,3 +1,6 @@
+// Only reached by the DEBUG self-tests in AppDelegate; wrapping the file keeps ~580 lines out of
+// the release binary.
+#if DEBUG
 import Cocoa
 import ScreenCaptureKit
 
@@ -582,3 +585,4 @@ final class OverlayView: NSView {
         s.draw(at: NSPoint(x: x, y: y))
     }
 }
+#endif
