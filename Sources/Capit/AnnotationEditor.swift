@@ -1336,6 +1336,10 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private var history: [[AnnotationShape]] = []
     private var redoHistory: [[AnnotationShape]] = []
 
+    /// A spotlight the click landed on while a drawing tool was active. The spot's lit area is meant
+    /// to be seen through, so the gesture goes to the tool; a click that never becomes a drag still
+    /// selects the spotlight (handled in mouseUp), which keeps it reachable without a "no tool" state.
+    private var pendingSpotlightClick: Int?
     private var moveIndex: Int?
     private var moveDown: CGPoint?
     private var moveStart0: CGPoint = .zero
@@ -1838,6 +1842,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
+        pendingSpotlightClick = nil
 
         if textField != nil {
             commitTextEditor()
@@ -1854,19 +1859,23 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             return
         }
         if event.clickCount == 1, let idx = hitShape(at: p) {
-            selectedIndex = idx
-            selectTool(shapes[idx].kind)
-            selectionChanged()
-            needsDisplay = true
-            if moveKinds.contains(shapes[idx].kind) {
-                moveIndex = idx
-                moveDown = p
-                moveStart0 = shapes[idx].start
-                moveEnd0 = shapes[idx].end
-                movePoints0 = shapes[idx].points
-                movePushed = false
+            if shapes[idx].kind == .spotlight, hasActiveTool {
+                pendingSpotlightClick = idx      // let the drawing tools have the gesture
+            } else {
+                selectedIndex = idx
+                selectTool(shapes[idx].kind)
+                selectionChanged()
+                needsDisplay = true
+                if moveKinds.contains(shapes[idx].kind) {
+                    moveIndex = idx
+                    moveDown = p
+                    moveStart0 = shapes[idx].start
+                    moveEnd0 = shapes[idx].end
+                    movePoints0 = shapes[idx].points
+                    movePushed = false
+                }
+                return
             }
-            return
         }
         // Single-click on empty space clears the selection. For drag-drawn tools, keep going
         // so the same drag that deselected can start drawing. Text/number need a fresh click.
@@ -1992,7 +2001,14 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         }
         if let shape = inProgress {
             if shape.rect.width < 1 && shape.rect.height < 1 {
-                inProgress = nil; needsDisplay = true; dragStart = nil; return
+                inProgress = nil; needsDisplay = true; dragStart = nil
+                if let idx = pendingSpotlightClick, idx < shapes.count {
+                    selectedIndex = idx
+                    selectTool(shapes[idx].kind)
+                    selectionChanged()
+                }
+                pendingSpotlightClick = nil
+                return
             }
             pushState()
             shapes.append(shape)
