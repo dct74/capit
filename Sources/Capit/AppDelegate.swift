@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var autoQuitItem: NSMenuItem?
     private var copyToClipboardItem: NSMenuItem?
+    private var hideMenuBarItem: NSMenuItem?
     #if DEBUG
     private var selftestController: InteractiveCaptureController?
     #endif
@@ -17,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let fullID9: UInt32 = 1, regionID0: UInt32 = 2
     private let fullID3: UInt32 = 3, regionID4: UInt32 = 4
     private let editorID: UInt32 = 5
+    private let menuBarID: UInt32 = 6
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBar()
@@ -26,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         runSelfTestIfRequested()
         runRealPathSelfTestIfRequested()
         runSampleRenderIfRequested()
+        runMenuBarSelfTestIfRequested()
 #endif
     }
 
@@ -35,6 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotKeys.unregister(id: fullID3)
         hotKeys.unregister(id: regionID4)
         hotKeys.unregister(id: editorID)
+        hotKeys.unregister(id: menuBarID)
     }
 
     /// Lets any in-flight capture write finish before the app quits, so a just-landed
@@ -58,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 case self.fullID9, self.fullID3: CaptureController.shared.captureFullScreen()
                 case self.regionID0, self.regionID4: CaptureController.shared.startInteractive()
                 case self.editorID: self.openEditor()
+                case self.menuBarID: self.toggleMenuBarIcon()
                 default: break
                 }
             }
@@ -68,9 +73,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = hotKeys.register(id: fullID3, keyCode: 20, modifiers: cmdShift)    // '3'
         _ = hotKeys.register(id: regionID4, keyCode: 21, modifiers: cmdShift)  // '4'
         _ = hotKeys.register(id: editorID, keyCode: 14, modifiers: UInt32(cmdKey))  // ⌘E
+        _ = hotKeys.register(id: menuBarID, keyCode: 46, modifiers: cmdShift)       // ⇧⌘M
     }
 
 #if DEBUG
+    /// `CAPIT_MENUBAR_TEST=1`: prints the visible/persisted state around a toggle, so the behaviour
+    /// can be checked from a script instead of by clicking.
+    private func runMenuBarSelfTestIfRequested() {
+        guard ProcessInfo.processInfo.environment["CAPIT_MENUBAR_TEST"] == "1" else { return }
+        func report(_ step: String) {
+            let check = (hideMenuBarItem?.state == .on) == Self.menuBarIconHidden
+            print("[menubar] \(step): isVisible=\(statusItem?.isVisible ?? false) "
+                  + "persistedHidden=\(Self.menuBarIconHidden) menuItemInSync=\(check)")
+            fflush(stdout)
+        }
+        // Report the hot key's own registration result: a taken key would silently leave the user
+        // with no way to bring the icon back.
+        hotKeys.unregister(id: menuBarID)
+        let keyOK = hotKeys.register(id: menuBarID, keyCode: 46,
+                                     modifiers: UInt32(cmdKey) | UInt32(shiftKey))
+        print("[menubar] ⇧⌘M register: \(keyOK)"); fflush(stdout)
+        report("launch")
+        toggleMenuBarIcon(); report("after 1st toggle")
+        toggleMenuBarIcon(); report("after 2nd toggle")
+        let pref = ProcessInfo.processInfo.environment["CAPIT_MENUBAR_TEST_PERSIST"] == "1"
+        Self.menuBarIconHidden = pref          // show what a relaunch would apply
+        statusItem?.isVisible = !pref
+        report("after simulating the persisted value")
+        exit(0)
+    }
+
     private func runSampleRenderIfRequested() {
         let enabled = ProcessInfo.processInfo.environment["CAPIT_SAMPLE"] == "1"
             || CommandLine.arguments.contains("-sample")
@@ -236,11 +268,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         autoQuit.state = IdleAutoQuit.isEnabled ? .on : .off
         autoQuitItem = autoQuit
         menu.addItem(autoQuit)
+        // The title says how to get the icon back: once hidden, this menu is unreachable, so the
+        // key equivalent is the only way in (plus the documented `defaults` fallback).
+        let hideMenuBar = NSMenuItem(title: "隐藏菜单栏图标（⇧⌘M 恢复）",
+                                     action: #selector(toggleMenuBarIcon), keyEquivalent: "")
+        hideMenuBar.target = self
+        hideMenuBar.state = Self.menuBarIconHidden ? .on : .off
+        hideMenuBarItem = hideMenuBar
+        menu.addItem(hideMenuBar)
         menu.addItem(withTitle: "关于", action: #selector(showAbout), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "退出 Capit", action: #selector(quit), keyEquivalent: "q")
 
         item.menu = menu
+        item.isVisible = !Self.menuBarIconHidden
         statusItem = item
     }
 
@@ -296,7 +337,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Menu → 关于: show the current version.
     @objc private func showAbout() {
         let info = Bundle.main.infoDictionary
-        let short = info?["CFBundleShortVersionString"] as? String ?? "1.3.0"
+        let short = info?["CFBundleShortVersionString"] as? String ?? "1.4.0"
         let alert = NSAlert()
         alert.messageText = "关于 Capit"
         alert.informativeText = "版本 v\(short)\n\n菜单栏截图标注工具。"
@@ -316,6 +357,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let enabled = !CaptureClipboard.isEnabled
         CaptureClipboard.isEnabled = enabled
         copyToClipboardItem?.state = enabled ? .on : .off
+    }
+
+    /// Whether the menu bar icon is hidden. Persisted, so the choice survives a relaunch; ⇧⌘M (and
+    /// `defaults write com.capit.Capit hideMenuBarIcon -bool false` for a lost hot key) restores it.
+    private static var menuBarIconHidden: Bool {
+        get { UserDefaults.standard.bool(forKey: "hideMenuBarIcon") }
+        set { UserDefaults.standard.set(newValue, forKey: "hideMenuBarIcon") }
+    }
+
+    /// Menu → 隐藏菜单栏图标 / ⇧⌘M: toggle the status item. Capturing keeps working while it is
+    /// hidden — the global hot keys and the idle timer do not depend on the icon.
+    @objc private func toggleMenuBarIcon() {
+        let hidden = !Self.menuBarIconHidden
+        Self.menuBarIconHidden = hidden
+        statusItem?.isVisible = !hidden
+        hideMenuBarItem?.state = hidden ? .on : .off
     }
 
     /// Menu → 空闲自动退出: opt in/out of quitting after 10 minutes of inactivity.
