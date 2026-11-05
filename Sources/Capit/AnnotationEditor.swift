@@ -1162,6 +1162,7 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         canvas.onCurrentWidthChanged = { [weak self] width in self?.toolbar.setWidthDisplay(width) }
         canvas.onActiveTool = { [weak self] kind in
             guard let self else { return }
+            guard let kind else { self.toolbar.setNoTool(); return }
             self.toolbar.setActiveTool(kind,
                                        lineDashed: self.canvas.effectiveLineDashed)
             // Selecting an existing spotlight adopts its opacity, so the slider has to follow.
@@ -1682,7 +1683,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     static let defaultStrokeWidth: CGFloat = 2
 
     var onCurrentWidthChanged: ((CGFloat) -> Void)?
-    var onActiveTool: ((AnnotationShape.Kind) -> Void)?
+    var onActiveTool: ((AnnotationShape.Kind?) -> Void)?
 
     private func notifyWidthDisplay() {
         let w: CGFloat
@@ -1702,7 +1703,10 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         if selectedIndex == nil {
             strokeWidth = defaultWidth(for: currentKind)
         }
-        onActiveTool?(currentKind)
+        // With no tool active nothing may be shown as selected: the editor opens that way, and a
+        // rotation deselects too. This used to always report `currentKind`, which lit the rect
+        // button after a rotate while the canvas stayed in "no tool" mode — the button lied.
+        onActiveTool?(hasActiveTool ? currentKind : nil)
         notifyWidthDisplay()
         refreshCursorRects()
     }
