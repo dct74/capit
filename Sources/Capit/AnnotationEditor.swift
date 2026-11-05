@@ -949,7 +949,18 @@ final class AnnotationHolder {
 }
 
 /// A vector annotation shape drawn on the canvas.
-struct AnnotationShape {    enum Kind {
+struct AnnotationShape {    /// Re-expresses the shape after its picture has turned 90° counter-clockwise: a point (x, y)
+    /// lands at (y, oldDocumentWidth − x). Text and number badges keep their upright orientation —
+    /// only their anchor moves — so labels stay readable after the turn.
+    func rotatedLeft(oldDocumentWidth w: CGFloat) -> AnnotationShape {
+        var s = self
+        s.start = CGPoint(x: start.y, y: w - start.x)
+        s.end = CGPoint(x: end.y, y: w - end.x)
+        s.points = points.map { CGPoint(x: $0.y, y: w - $0.x) }
+        return s
+    }
+
+    enum Kind {
         case rect, ellipse, arrow, line, highlighter, text, number, mosaic, spotlight
     }
     var kind: Kind
@@ -991,7 +1002,10 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
     private let window: NSWindow
     private let canvas: AnnotationCanvasView
     private let toolbar: ToolbarView
-    private let image: CGImage
+    /// The picture in its current orientation, and the document size in points. Both live on the
+    /// canvas, which is what rotates them — the editor only reads them when saving.
+    private var image: CGImage { canvas.currentImage }
+    private var docSize: CGSize { canvas.documentSize }
     private let fileURL: URL?
     /// Imported images: saving overwrites the source file, and closing without saving must
     /// NOT overwrite it with the un-annotated capture.
@@ -1004,7 +1018,6 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
     /// curve than region/window ones, so it has to travel with the capture rather than be a
     /// constant at the point of writing.
     private let radiusRatio: CGFloat
-    private let docSize: CGSize
     private var didSave = false
     private var isSaving = false
     private var rawLandingQueued = false
@@ -1031,15 +1044,14 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
     init?(image: CGImage, fileURL: URL?, isImported: Bool = false,
           needsFinishing: Bool = true,
           radiusRatio: CGFloat = ImageProcessor.cornerRadiusRatio) {
-        self.image = image
         self.fileURL = fileURL
         self.isImported = isImported
         self.needsFinishing = needsFinishing
         self.radiusRatio = radiusRatio
-        docSize = CGSize(width: CGFloat(image.width) / 2,
-                         height: CGFloat(image.height) / 2)
+        let initialSize = CGSize(width: CGFloat(image.width) / 2,
+                                 height: CGFloat(image.height) / 2)
 
-        canvas = AnnotationCanvasView(image: image, docSize: docSize)
+        canvas = AnnotationCanvasView(image: image, docSize: initialSize)
         currentDocumentIsDecorated = !needsFinishing
         toolbar = ToolbarView()
 
@@ -1143,6 +1155,10 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         toolbar.onSpotlightOpacity = { [weak self] v in self?.canvas.setSpotlightOpacity(v) }
         toolbar.onSpotlightOpacityEnd = { [weak self] in self?.canvas.endSpotlightOpacityEdit() }
         toolbar.onSave = { [weak self] in self?.save() }
+        toolbar.onRotate = { [weak self] in self?.canvas.rotateLeft90() }
+        // The document changed shape: re-fit, but never touch the window itself, so the editor does
+        // not jump under the cursor.
+        canvas.onDocumentGeometryChanged = { [weak self] in self?.relayoutImage() }
         canvas.onCurrentWidthChanged = { [weak self] width in self?.toolbar.setWidthDisplay(width) }
         canvas.onActiveTool = { [weak self] kind in
             guard let self else { return }
@@ -1167,6 +1183,8 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
             switch event.keyCode {
             case 1 where cmd:            // Cmd+S
                 self.save(); return nil
+            case 15 where cmd && !editingText:      // Cmd+R
+                self.canvas.rotateLeft90(); return nil
             case 6 where cmd && !editingText:
                 if shift { self.canvas.requestRedo() } else { self.canvas.requestUndo() }
                 return nil
@@ -1374,8 +1392,15 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     var textFontSize: CGFloat = 20
 
     private var selectedIndex: Int?
-    private var history: [[AnnotationShape]] = []
-    private var redoHistory: [[AnnotationShape]] = []
+    /// Undo has to carry the picture's orientation as well as the shapes: after a rotation the
+    /// annotations are expressed in the rotated document, so restoring shapes alone would draw them
+    /// at the wrong place on a still-turned picture.
+    private struct Snapshot {
+        var shapes: [AnnotationShape]
+        var rotation: Int
+    }
+    private var history: [Snapshot] = []
+    private var redoHistory: [Snapshot] = []
 
     /// A spotlight the click landed on while a drawing tool was active. The spot's lit area is meant
     /// to be seen through, so the gesture goes to the tool; a click that never becomes a drag still
@@ -1391,20 +1416,57 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     /// instead of dropping the stroke.
     private static let highlighterMaxPoints = 4096
 
-    func pushState() { history.append(shapes); if history.count > 60 { history.removeFirst() }; redoHistory.removeAll() }
+    private var snapshot: Snapshot { Snapshot(shapes: shapes, rotation: rotationQuarterTurns) }
+
+    func pushState() {
+        history.append(snapshot)
+        if history.count > 60 { history.removeFirst() }
+        redoHistory.removeAll()
+    }
+
+    /// Menu-less rotate: turns the picture (and every annotation with it) 90° counter-clockwise.
+    /// Doing it again keeps turning, so 180° is two presses and 270° is three — no angle picker.
+    func rotateLeft90() {
+        pushState()
+        let oldWidth = documentSize.width
+        shapes = shapes.map { $0.rotatedLeft(oldDocumentWidth: oldWidth) }
+        applyRotation(rotationQuarterTurns + 1)
+        selectedIndex = nil
+        selectionChanged()
+    }
+
+    /// Rebuilds the picture for `turns` quarter turns, without touching the shapes' coordinates.
+    private func applyRotation(_ turns: Int) {
+        rotationQuarterTurns = ((turns % 4) + 4) % 4
+        var img = originalImage
+        for _ in 0..<rotationQuarterTurns {
+            img = ImageProcessor.rotatedLeft90(img) ?? img
+        }
+        currentImage = img
+        let pixelW = CGFloat(img.width) / 2, pixelH = CGFloat(img.height) / 2
+        documentSize = CGSize(width: pixelW, height: pixelH)
+        currentDocumentImage = img
+        currentDocumentSize = documentSize
+        baseDraw = NSImage(cgImage: img, size: NSSize(width: pixelW, height: pixelH))
+        frame = NSRect(origin: .zero, size: documentSize)
+        needsDisplay = true
+        onDocumentGeometryChanged?()
+    }
 
     func undo() {
         guard let s = history.popLast() else { return }
-        redoHistory.append(shapes)
-        shapes = s
-        selectedIndex = nil
-        selectionChanged()
-        needsDisplay = true
+        redoHistory.append(snapshot)
+        restore(s)
     }
     func redo() {
         guard let s = redoHistory.popLast() else { return }
-        history.append(shapes)
-        shapes = s
+        history.append(snapshot)
+        restore(s)
+    }
+
+    private func restore(_ s: Snapshot) {
+        shapes = s.shapes
+        if s.rotation != rotationQuarterTurns { applyRotation(s.rotation) }
         selectedIndex = nil
         selectionChanged()
         needsDisplay = true
@@ -1706,11 +1768,25 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         refreshCursorRects()
     }
 
-    private let baseDraw: NSImage
+    private var baseDraw: NSImage
     private var dragStart: CGPoint?
     private var inProgress: AnnotationShape?
 
+    /// The picture as it arrived; every orientation is derived from it, so going back and forth can
+    /// never accumulate resampling. Rotating only ever moves pixels.
+    private let originalImage: CGImage
+    private var rotationQuarterTurns = 0
+    /// The picture in the orientation currently on screen — what the editor writes to disk.
+    private(set) var currentImage: CGImage
+    /// The document's size in points, which swaps with every odd quarter turn.
+    private(set) var documentSize: CGSize
+    /// Called after the document changes shape, so the editor can re-fit the scroll view.
+    var onDocumentGeometryChanged: (() -> Void)?
+
     init(image: CGImage, docSize: CGSize) {
+        originalImage = image
+        currentImage = image
+        documentSize = docSize
         currentDocumentImage = image
         currentDocumentSize = docSize
         self.baseDraw = NSImage(cgImage: image,
@@ -2078,6 +2154,7 @@ final class ToolbarView: NSView {
     var onSpotlightOpacity: ((CGFloat) -> Void)?
     var onSpotlightOpacityEnd: (() -> Void)?
     var onSave: (() -> Void)?
+    var onRotate: (() -> Void)?
     var onPanelColorSeed: (() -> NSColor)?
 
     private var fontPop: NSPopUpButton?
@@ -2197,6 +2274,27 @@ final class ToolbarView: NSView {
         stack.detachesHiddenViews = true
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
+
+        // Leftmost: rotate the picture. It sits before the tools because it is about the picture, not
+        // about what is drawn on it.
+        let rotateBtn = NSButton(title: "", target: self, action: #selector(rotateClicked))
+        rotateBtn.bezelStyle = .texturedRounded
+        rotateBtn.isBordered = false
+        rotateBtn.focusRingType = .none
+        rotateBtn.refusesFirstResponder = true
+        rotateBtn.image = NSImage(systemSymbolName: "rotate.left",
+                                  accessibilityDescription: "逆时针旋转 90°")
+        rotateBtn.toolTip = "逆时针旋转 90°（⌘R）"
+        NSLayoutConstraint.activate([
+            rotateBtn.widthAnchor.constraint(equalToConstant: 32),
+            rotateBtn.heightAnchor.constraint(equalToConstant: 28)
+        ])
+        stack.addArrangedSubview(rotateBtn)
+        let divider = NSBox()
+        divider.boxType = .separator
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([divider.heightAnchor.constraint(equalToConstant: 20)])
+        stack.addArrangedSubview(divider)
 
         let items: [(AnnotationShape.Kind, String)] = [
             (.rect, "rectangle"), (.ellipse, "circle"),
@@ -2323,6 +2421,8 @@ final class ToolbarView: NSView {
         }
         needsDisplay = true
     }
+
+    @objc private func rotateClicked() { onRotate?() }
 
     @objc private func colorClicked() {
         let panel = NSColorPanel.shared
