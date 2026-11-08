@@ -267,7 +267,7 @@ open build/Capit.app
 Package.swift
 make_app.sh
 LICENSE
-resources/AppIcon.icns   AppIcon.png
+resources/AppIcon.icns
 Sources/Capit/
   main.swift  AppDelegate.swift  GlobalHotKey.swift
   CaptureController.swift  CaptureKit.swift  InteractiveCapture.swift
