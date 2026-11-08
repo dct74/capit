@@ -93,14 +93,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             image.draw(in: NSRect(x: 0, y: 0, width: CGFloat(W), height: CGFloat(H)))
             NSGraphicsContext.restoreGraphicsState()
         }
-        print("[menubar] glyph (' '=transparent, '.'=light, '#'=dark):")
+        print("[menubar] glyph ('#'=stroke, ' '=empty):")
         for y in 0..<H {
             var line = "    |"
             for x in 0..<W {
                 let o = (y * W + x) * 4
-                if buf[o + 3] < 40 { line += " "; continue }
-                let v = Int(buf[o])
-                line += v > 200 ? "." : (v > 120 ? "+" : (v > 60 ? "x" : "#"))
+                line += buf[o + 3] < 60 ? " " : "#"
             }
             print(line + "|")
         }
@@ -269,11 +267,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// than every neighbour in the bar. The badge's light face is dropped so that only its ring and the
     /// camera remain, which is what makes it work as a monochrome menu bar glyph.
     private static func statusBarIcon() -> NSImage? {
-        // Drawn rather than thresholded from `AppIcon.icns`. Measured on the icon: its camera covers
-        // 87% of the badge (717 of 824 px across), so a dark-pixel silhouette of it has no room to
-        // read at 17 pt — it comes out as a filled square with a hole where the lens was. This glyph
-        // keeps the icon's shape language (rounded square + camera) but gives the camera room inside
-        // the frame, which is what actually survives at menu bar size.
+        // Just a lens: a circle with a few diagonal strokes across it, no frame around it. White, and
+        // deliberately not a template — the strokes are meant to stay white rather than flip to black
+        // on a light menu bar.
         let side = statusIconPointSize
         let scale: CGFloat = 2                      // draw at 2x so the strokes stay crisp on retina
         guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
@@ -284,28 +280,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rep.size = NSSize(width: side, height: side)
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-        NSColor.black.setStroke()
-        NSColor.black.setFill()
-        // Frame.
-        let frame = NSBezierPath(roundedRect: NSRect(x: 1.2, y: 1.2, width: side - 2.4, height: side - 2.4),
-                                 xRadius: 3.4, yRadius: 3.4)
-        frame.lineWidth = 1.3
-        frame.stroke()
-        // Camera body, with the viewfinder bump on top of it.
-        let body = NSBezierPath(roundedRect: NSRect(x: 4.4, y: 6.6, width: 8.2, height: 6.2),
-                                xRadius: 1.3, yRadius: 1.3)
-        body.lineWidth = 1.25
-        body.stroke()
-        let bump = NSBezierPath(roundedRect: NSRect(x: 7.5, y: 5.4, width: 2.0, height: 2.0),
-                                xRadius: 0.5, yRadius: 0.5)
-        bump.lineWidth = 1.25
-        bump.stroke()
-        // Lens: a ring, so the camera stays open in the middle.
-        let lens = NSBezierPath(ovalIn: NSRect(x: 7.1, y: 8.2, width: 2.8, height: 2.8))
-        lens.lineWidth = 1.25
+        NSColor.white.setStroke()
+
+        let lens = NSBezierPath(ovalIn: NSRect(x: 1.4, y: 1.4, width: side - 2.8, height: side - 2.8))
+        lens.lineWidth = 1.3
         lens.stroke()
+
+        // Three diagonal strokes inside the lens, clipped to it so they end at its edge.
+        NSGraphicsContext.saveGraphicsState()
+        lens.addClip()
+        let ink = NSBezierPath()
+        for offset in [-3.4, 0.0, 3.4] {
+            ink.move(to: NSPoint(x: offset - 6, y: -2))
+            ink.line(to: NSPoint(x: offset + 12, y: side + 2))
+        }
+        ink.lineWidth = 1.15
+        ink.stroke()
         NSGraphicsContext.restoreGraphicsState()
 
+        NSGraphicsContext.restoreGraphicsState()
         let image = NSImage(size: NSSize(width: side, height: side))
         image.addRepresentation(rep)
         return image
@@ -315,8 +308,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
             button.image = Self.statusBarIcon()
-            // A template, so the menu bar tints the silhouette to match its own appearance.
-            button.image?.isTemplate = true
+            // Not a template: the strokes are white by design. A template would be repainted black on
+            // a light menu bar, which is the one place this glyph is meant to stay white.
+            button.image?.isTemplate = false
             button.image?.accessibilityDescription = "Capit"
         }
 
