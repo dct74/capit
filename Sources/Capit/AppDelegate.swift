@@ -267,41 +267,101 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// than every neighbour in the bar. The badge's light face is dropped so that only its ring and the
     /// camera remain, which is what makes it work as a monochrome menu bar glyph.
     private static func statusBarIcon() -> NSImage? {
-        // Just a lens: a circle with a few diagonal strokes across it, no frame around it. White, and
-        // deliberately not a template — the strokes are meant to stay white rather than flip to black
-        // on a light menu bar.
-        let side = statusIconPointSize
-        let scale: CGFloat = 2                      // draw at 2x so the strokes stay crisp on retina
-        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
-                                         pixelsWide: Int(side * scale), pixelsHigh: Int(side * scale),
-                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
-                                         isPlanar: false, colorSpaceName: .deviceRGB,
-                                         bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
-        rep.size = NSSize(width: side, height: side)
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-        NSColor.white.setStroke()
-
-        let lens = NSBezierPath(ovalIn: NSRect(x: 1.4, y: 1.4, width: side - 2.8, height: side - 2.8))
-        lens.lineWidth = 1.3
-        lens.stroke()
-
-        // Three diagonal strokes inside the lens, clipped to it so they end at its edge.
-        NSGraphicsContext.saveGraphicsState()
-        lens.addClip()
-        let ink = NSBezierPath()
-        for offset in [-3.4, 0.0, 3.4] {
-            ink.move(to: NSPoint(x: offset - 6, y: -2))
-            ink.line(to: NSPoint(x: offset + 12, y: side + 2))
+        // A lens: the circle, plus the shutter-blade seams that the app icon already draws inside it.
+        // The seams are *extracted from the icon* (gradient inside the lens) rather than invented —
+        // they are the one part of the artwork worth carrying over, and at 17 pt only they survive.
+        guard let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+              let source = NSImage(contentsOf: url),
+              var rect = Optional(CGRect(origin: .zero, size: source.size)),
+              let cg = source.cgImage(forProposedRect: &rect, context: nil, hints: nil) else {
+            return nil
         }
-        ink.lineWidth = 1.15
-        ink.stroke()
-        NSGraphicsContext.restoreGraphicsState()
+        let side = statusIconPointSize
+        let scale: CGFloat = 2
+        let T = Int(side * scale)                       // 34 px
+        let radius = Double(T) / 2 - 1.3                // the circle, inset by half its stroke
+        let c = Double(T) / 2
 
-        NSGraphicsContext.restoreGraphicsState()
-        let image = NSImage(size: NSSize(width: side, height: side))
-        image.addRepresentation(rep)
-        return image
+        var buf = [UInt8](repeating: 0, count: T * T * 4)
+        // The circle, rasterised by distance so it stays symmetric.
+        for y in 0..<T {
+            for x in 0..<T {
+                let d = (pow(Double(x) + 0.5 - c, 2) + pow(Double(y) + 0.5 - c, 2)).squareRoot()
+                if abs(d - radius) <= 1.3 {
+                    let o = (y * T + x) * 4
+                    buf[o] = 255; buf[o + 1] = 255; buf[o + 2] = 255; buf[o + 3] = 255
+                }
+            }
+        }
+        // The seams, sampled from the icon's lens. Cells whose centre falls outside the circle are
+        // dropped: the lens square has corners the circle does not.
+        for (tx, ty) in bladeSeams(of: cg, resolution: T) {
+            let d = (pow(Double(tx) + 0.5 - c, 2) + pow(Double(ty) + 0.5 - c, 2)).squareRoot()
+            guard d <= radius - 0.6 else { continue }
+            let o = (ty * T + tx) * 4
+            buf[o] = 255; buf[o + 1] = 255; buf[o + 2] = 255; buf[o + 3] = 255
+        }
+        guard let provider = CGDataProvider(data: Data(buf) as CFData),
+              let out = CGImage(width: T, height: T, bitsPerComponent: 8, bitsPerPixel: 32,
+                                bytesPerRow: T * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                                provider: provider, decode: nil, shouldInterpolate: false,
+                                intent: .defaultIntent) else { return nil }
+        return NSImage(cgImage: out, size: NSSize(width: side, height: side))
+    }
+
+    /// The shutter-blade seams inside the icon's lens, as a `resolution` x `resolution` grid.
+    /// The lens is found from the icon's ink box (its radius is 0.44 of it), the seams are the strong
+    /// gradients inside the glass, and the outer rim is skipped because the glyph draws its own circle.
+    /// A target cell lights up if *any* source pixel under it has an edge, so the thin lines survive
+    /// the reduction to menu bar size.
+    private static func bladeSeams(of image: CGImage, resolution: Int) -> [(Int, Int)] {
+        let w = image.width, h = image.height
+        var px = [UInt8](repeating: 0, count: w * h * 4)
+        px.withUnsafeMutableBytes { raw in
+            guard let ctx = CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8,
+                                      bytesPerRow: w * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h)))
+        }
+        var minX = w, minY = h, maxX = -1, maxY = -1
+        for y in 0..<h {
+            for x in 0..<w where px[(y * w + x) * 4 + 3] > 128 {
+                if x < minX { minX = x }; if x > maxX { maxX = x }
+                if y < minY { minY = y }; if y > maxY { maxY = y }
+            }
+        }
+        guard maxX > minX, maxY > minY else { return [] }
+        let cx = (minX + maxX) / 2, cy = (minY + maxY) / 2
+        let lensR = Int(Double(min(maxX - minX, maxY - minY)) * 0.44)
+        func lum(_ x: Int, _ y: Int) -> Int {
+            let o = (y * w + x) * 4
+            return (Int(px[o]) * 3 + Int(px[o + 1]) * 4 + Int(px[o + 2])) / 8
+        }
+        let cell = Double(2 * lensR) / Double(resolution)
+        var hits: [(Int, Int)] = []
+        for ty in 0..<resolution {
+            for tx in 0..<resolution {
+                var found = false
+                var sy = 0
+                while !found, sy < Int(cell) {
+                    var sx = 0
+                    while !found, sx < Int(cell) {
+                        let x = cx - lensR + Int(Double(tx) * cell) + sx
+                        let y = cy - lensR + Int(Double(ty) * cell) + sy
+                        sx += 2
+                        guard x > 2, x < w - 3, y > 2, y < h - 3 else { continue }
+                        let d = (pow(Double(x - cx), 2) + pow(Double(y - cy), 2)).squareRoot() / Double(lensR)
+                        guard d < 0.86, d > 0.10 else { continue }
+                        let g = abs(lum(x + 2, y) - lum(x - 2, y)) + abs(lum(x, y + 2) - lum(x, y - 2))
+                        if g > 90 { found = true }
+                    }
+                    sy += 2
+                }
+                if found { hits.append((tx, ty)) }
+            }
+        }
+        return hits
     }
 
     private func setupMenuBar() {
