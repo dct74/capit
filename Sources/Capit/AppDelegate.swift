@@ -77,6 +77,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
 #if DEBUG
+    /// Prints the menu bar glyph as ASCII, so "is the camera actually there?" can be answered from a
+    /// script rather than by squinting at the bar.
+    private static func dumpASCII(_ image: NSImage) {
+        let W = 22, H = 12
+        var buf = [UInt8](repeating: 0, count: W * H * 4)
+        buf.withUnsafeMutableBytes { raw in
+            guard let ctx = CGContext(data: raw.baseAddress, width: W, height: H, bitsPerComponent: 8,
+                                      bytesPerRow: W * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
+            image.draw(in: NSRect(x: 0, y: 0, width: CGFloat(W), height: CGFloat(H)))
+            NSGraphicsContext.restoreGraphicsState()
+        }
+        print("[menubar] glyph (' '=transparent, '.'=light, '#'=dark):")
+        for y in 0..<H {
+            var line = "    |"
+            for x in 0..<W {
+                let o = (y * W + x) * 4
+                if buf[o + 3] < 40 { line += " "; continue }
+                let v = Int(buf[o])
+                line += v > 200 ? "." : (v > 120 ? "+" : (v > 60 ? "x" : "#"))
+            }
+            print(line + "|")
+        }
+    }
+
     /// `CAPIT_MENUBAR_TEST=1`: prints the visible/persisted state around a toggle, so the behaviour
     /// can be checked from a script instead of by clicking.
     private func runMenuBarSelfTestIfRequested() {
@@ -85,6 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let img = statusItem?.button?.image {
                 print("[menubar] icon: \(Int(img.size.width))x\(Int(img.size.height)) pt "
                       + "isTemplate=\(img.isTemplate) reps=\(img.representations.count)")
+                Self.dumpASCII(img)
                 fflush(stdout)
             }
             let check = (hideMenuBarItem?.state == .on) == Self.menuBarIconHidden
@@ -236,8 +264,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The menu bar glyph is the app icon (`resources/AppIcon.icns`), not an SF Symbol, so changing
     /// the icon changes the status item too. The icon is trimmed to its ink before scaling: it ships
     /// with padding, and scaling the padded square made the glyph look a couple of points smaller
-    /// than every neighbour in the bar. Drawn as a template, so it is a black/white silhouette that
-    /// follows the menu bar's appearance rather than showing the icon's own shading.
+    /// than every neighbour in the bar. Shown as-is rather than as a template — see the note at the
+    /// call site: the glyph sits inside an opaque square, so an alpha-only silhouette is just a square.
     private static func statusBarIcon() -> NSImage? {
         let fallback = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "Capit")?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: statusIconPointSize, weight: .regular))
@@ -280,7 +308,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
             button.image = Self.statusBarIcon()
-            button.image?.isTemplate = true
+            // Not a template: the icon is an opaque rounded-square badge with a camera drawn *inside*
+            // it, so keeping only its alpha renders a solid square — the camera has no transparency of
+            // its own and would be flattened away.
+            button.image?.isTemplate = false
             button.image?.accessibilityDescription = "Capit"
         }
 
