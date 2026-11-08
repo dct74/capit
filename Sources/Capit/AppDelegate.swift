@@ -80,7 +80,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Prints the menu bar glyph as ASCII, so "is the camera actually there?" can be answered from a
     /// script rather than by squinting at the bar.
     private static func dumpASCII(_ image: NSImage) {
-        let W = 22, H = 12
+        // Keep the glyph square: drawing 17x17 into a wide rect stretched it and made the preview
+        // look far heavier than the menu bar does.
+        let W = 18, H = 18
         var buf = [UInt8](repeating: 0, count: W * H * 4)
         buf.withUnsafeMutableBytes { raw in
             guard let ctx = CGContext(data: raw.baseAddress, width: W, height: H, bitsPerComponent: 8,
@@ -264,54 +266,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The menu bar glyph is the app icon (`resources/AppIcon.icns`), not an SF Symbol, so changing
     /// the icon changes the status item too. The icon is trimmed to its ink before scaling: it ships
     /// with padding, and scaling the padded square made the glyph look a couple of points smaller
-    /// than every neighbour in the bar. Shown as-is rather than as a template — see the note at the
-    /// call site: the glyph sits inside an opaque square, so an alpha-only silhouette is just a square.
+    /// than every neighbour in the bar. The badge's light face is dropped so that only its ring and the
+    /// camera remain, which is what makes it work as a monochrome menu bar glyph.
     private static func statusBarIcon() -> NSImage? {
-        let fallback = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "Capit")?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: statusIconPointSize, weight: .regular))
-        guard let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
-              let source = NSImage(contentsOf: url),
-              var rect = Optional(CGRect(origin: .zero, size: source.size)),
-              let cg = source.cgImage(forProposedRect: &rect, context: nil, hints: nil) else {
-            return fallback
-        }
-        // Find the ink: the smallest rectangle containing non-transparent pixels.
-        let w = cg.width, h = cg.height
-        var alpha = [UInt8](repeating: 0, count: w * h)
-        alpha.withUnsafeMutableBytes { raw in
-            let ctx = CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8,
-                                bytesPerRow: w, space: CGColorSpaceCreateDeviceGray(),
-                                bitmapInfo: CGImageAlphaInfo.none.rawValue)
-            ctx?.draw(cg, in: CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h)))
-        }
-        var minX = w, minY = h, maxX = -1, maxY = -1
-        for y in 0..<h {
-            for x in 0..<w where alpha[y * w + x] > 8 {
-                if x < minX { minX = x }; if x > maxX { maxX = x }
-                if y < minY { minY = y }; if y > maxY { maxY = y }
-            }
-        }
-        guard maxX > minX, maxY > minY,
-              let ink = cg.cropping(to: CGRect(x: minX, y: minY,
-                                               width: maxX - minX + 1, height: maxY - minY + 1)) else {
-            return fallback
-        }
-        // Present the *cropped* pixels at the given ink height and let AppKit downscale: the crop is
-        // 833 px tall, so a 17 pt image carries ~49x the pixels it needs and stays sharp on a retina
-        // bar. Redrawing it into a 17 pt bitmap instead would have thrown that away.
-        let height = statusIconPointSize
-        let width = max((height * CGFloat(ink.width) / CGFloat(ink.height)).rounded(), 1)
-        return NSImage(cgImage: ink, size: NSSize(width: width, height: height))
+        // Drawn rather than thresholded from `AppIcon.icns`. Measured on the icon: its camera covers
+        // 87% of the badge (717 of 824 px across), so a dark-pixel silhouette of it has no room to
+        // read at 17 pt — it comes out as a filled square with a hole where the lens was. This glyph
+        // keeps the icon's shape language (rounded square + camera) but gives the camera room inside
+        // the frame, which is what actually survives at menu bar size.
+        let side = statusIconPointSize
+        let scale: CGFloat = 2                      // draw at 2x so the strokes stay crisp on retina
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
+                                         pixelsWide: Int(side * scale), pixelsHigh: Int(side * scale),
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                         isPlanar: false, colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+        rep.size = NSSize(width: side, height: side)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSColor.black.setStroke()
+        NSColor.black.setFill()
+        // Frame.
+        let frame = NSBezierPath(roundedRect: NSRect(x: 1.2, y: 1.2, width: side - 2.4, height: side - 2.4),
+                                 xRadius: 3.4, yRadius: 3.4)
+        frame.lineWidth = 1.3
+        frame.stroke()
+        // Camera body, with the viewfinder bump on top of it.
+        let body = NSBezierPath(roundedRect: NSRect(x: 4.4, y: 6.6, width: 8.2, height: 6.2),
+                                xRadius: 1.3, yRadius: 1.3)
+        body.lineWidth = 1.25
+        body.stroke()
+        let bump = NSBezierPath(roundedRect: NSRect(x: 7.5, y: 5.4, width: 2.0, height: 2.0),
+                                xRadius: 0.5, yRadius: 0.5)
+        bump.lineWidth = 1.25
+        bump.stroke()
+        // Lens: a ring, so the camera stays open in the middle.
+        let lens = NSBezierPath(ovalIn: NSRect(x: 7.1, y: 8.2, width: 2.8, height: 2.8))
+        lens.lineWidth = 1.25
+        lens.stroke()
+        NSGraphicsContext.restoreGraphicsState()
+
+        let image = NSImage(size: NSSize(width: side, height: side))
+        image.addRepresentation(rep)
+        return image
     }
 
     private func setupMenuBar() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
             button.image = Self.statusBarIcon()
-            // Not a template: the icon is an opaque rounded-square badge with a camera drawn *inside*
-            // it, so keeping only its alpha renders a solid square — the camera has no transparency of
-            // its own and would be flattened away.
-            button.image?.isTemplate = false
+            // A template, so the menu bar tints the silhouette to match its own appearance.
+            button.image?.isTemplate = true
             button.image?.accessibilityDescription = "Capit"
         }
 
