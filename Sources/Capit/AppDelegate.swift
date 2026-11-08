@@ -268,16 +268,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                width: maxX - minX + 1, height: maxY - minY + 1)) else {
             return fallback
         }
-        // Scale to the given ink height, keeping the aspect ratio.
+        // Present the *cropped* pixels at the given ink height and let AppKit downscale: the crop is
+        // 833 px tall, so a 17 pt image carries ~49x the pixels it needs and stays sharp on a retina
+        // bar. Redrawing it into a 17 pt bitmap instead would have thrown that away.
         let height = statusIconPointSize
-        let width = (height * CGFloat(ink.width) / CGFloat(ink.height)).rounded()
-        let out = NSImage(size: NSSize(width: max(width, 1), height: height))
-        out.lockFocus()
-        NSGraphicsContext.current?.imageInterpolation = .high
-        NSImage(cgImage: ink, size: NSSize(width: ink.width, height: ink.height))
-            .draw(in: NSRect(x: 0, y: 0, width: max(width, 1), height: height))
-        out.unlockFocus()
-        return out
+        let width = max((height * CGFloat(ink.width) / CGFloat(ink.height)).rounded(), 1)
+        return NSImage(cgImage: ink, size: NSSize(width: width, height: height))
     }
 
     private func setupMenuBar() {
