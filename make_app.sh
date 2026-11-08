@@ -27,6 +27,9 @@ cp "$BIN" "$STAGE/Contents/MacOS/$APP_NAME"
 
 if [ -f "resources/AppIcon.icns" ]; then
   cp "resources/AppIcon.icns" "$STAGE/Contents/Resources/AppIcon.icns"
+  # A downloaded icon carries provenance / quarantine / lastuseddate. Those are inside the bundle,
+  # so codesign refuses to sign ("resource fork, Finder information, or similar detritus").
+  xattr -c "$STAGE/Contents/Resources/AppIcon.icns" 2>/dev/null || true
 fi
 
 cat > "$STAGE/Contents/Info.plist" <<'PLIST'
@@ -42,8 +45,8 @@ cat > "$STAGE/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key><string>Capit</string>
     <key>CFBundleDisplayName</key><string>Capit</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.5.0</string>
-    <key>CFBundleVersion</key><string>37</string>
+    <key>CFBundleShortVersionString</key><string>1.5.1</string>
+    <key>CFBundleVersion</key><string>38</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.graphics-design</string>
     <key>LSUIElement</key><true/>
