@@ -60,6 +60,9 @@ swift build -c release
 
 # 4) 启动
 open build/Capit.app
+
+# 5) 发布用的 zip（含校验：签名、版本、AppleDouble、sha256）
+./package_release.sh
 ```
 
 产物 `build/Capit.app` 完全自包含（单可执行文件 + 图标 + Info.plist），无外部框架，可直接拷贝到别的 Mac。
@@ -70,6 +73,7 @@ open build/Capit.app
 - **换了应用图标**（`Camera.icns`）。
 - **菜单栏图标改成"镜头"**：白色圆 + 圆内交叉的快门叶片接缝，不再使用 SF Symbol。接缝是从应用图标里**提取**的（镜片内的亮度梯度，2x 采样后裁剪到圆内），不是手画的近似。圆内不再套外框。注意：线条是固定的白色，浅色菜单栏上会偏淡（系统图标是自适应的）。
 - 图标替换后 `make_app.sh` 会先清掉图标文件的扩展属性再签名——下载来的 `.icns` 带 quarantine/provenance，会让 `codesign` 直接拒绝打包。
+- 发表用的 zip 由 `package_release.sh` 生成：它用 `ditto --norsrc --noextattr` 打包，避免 `._AppIcon.icns` 这类 AppleDouble 条目混进资产（签名后 macOS 会重新给文件打上 `com.apple.provenance`，普通 `ditto` 会把它存成额外条目），并自动校验签名、版本号与压缩包内容。
 
 ### v1.5.0
 - **新增：编辑器内旋转**。工具栏最左的旋转按钮（或 `⌘R`）把整张图逆时针转 90°，标注一起转、可撤销、四次回到原样且像素无损；窗口尺寸不跳，只重新适配缩放。
@@ -265,7 +269,7 @@ open build/Capit.app
 
 ```
 Package.swift
-make_app.sh
+make_app.sh   package_release.sh
 LICENSE
 resources/AppIcon.icns
 Sources/Capit/
