@@ -82,6 +82,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func runMenuBarSelfTestIfRequested() {
         guard ProcessInfo.processInfo.environment["CAPIT_MENUBAR_TEST"] == "1" else { return }
         func report(_ step: String) {
+            if let img = statusItem?.button?.image {
+                print("[menubar] icon: \(Int(img.size.width))x\(Int(img.size.height)) pt "
+                      + "isTemplate=\(img.isTemplate) reps=\(img.representations.count)")
+                fflush(stdout)
+            }
             let check = (hideMenuBarItem?.state == .on) == Self.menuBarIconHidden
             print("[menubar] \(step): isVisible=\(statusItem?.isVisible ?? false) "
                   + "persistedHidden=\(Self.menuBarIconHidden) menuItemInSync=\(check)")
@@ -228,15 +233,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// both tried and measure identically (42 px drawn either way), so both are gone.
     private static let statusIconPointSize: CGFloat = 17
 
+    /// The menu bar glyph is the app icon (`resources/AppIcon.icns`), not an SF Symbol, so changing
+    /// the icon changes the status item too. The icon is trimmed to its ink before scaling: it ships
+    /// with padding, and scaling the padded square made the glyph look a couple of points smaller
+    /// than every neighbour in the bar. Drawn as a template, so it is a black/white silhouette that
+    /// follows the menu bar's appearance rather than showing the icon's own shading.
+    private static func statusBarIcon() -> NSImage? {
+        let fallback = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "Capit")?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: statusIconPointSize, weight: .regular))
+        guard let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+              let source = NSImage(contentsOf: url),
+              var rect = Optional(CGRect(origin: .zero, size: source.size)),
+              let cg = source.cgImage(forProposedRect: &rect, context: nil, hints: nil) else {
+            return fallback
+        }
+        // Find the ink: the smallest rectangle containing non-transparent pixels.
+        let w = cg.width, h = cg.height
+        var alpha = [UInt8](repeating: 0, count: w * h)
+        alpha.withUnsafeMutableBytes { raw in
+            let ctx = CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8,
+                                bytesPerRow: w, space: CGColorSpaceCreateDeviceGray(),
+                                bitmapInfo: CGImageAlphaInfo.none.rawValue)
+            ctx?.draw(cg, in: CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h)))
+        }
+        var minX = w, minY = h, maxX = -1, maxY = -1
+        for y in 0..<h {
+            for x in 0..<w where alpha[y * w + x] > 8 {
+                if x < minX { minX = x }; if x > maxX { maxX = x }
+                if y < minY { minY = y }; if y > maxY { maxY = y }
+            }
+        }
+        guard maxX > minX, maxY > minY,
+              let ink = cg.cropping(to: CGRect(x: minX, y: minY,
+                                               width: maxX - minX + 1, height: maxY - minY + 1)) else {
+            return fallback
+        }
+        // Scale to the given ink height, keeping the aspect ratio.
+        let height = statusIconPointSize
+        let width = (height * CGFloat(ink.width) / CGFloat(ink.height)).rounded()
+        let out = NSImage(size: NSSize(width: max(width, 1), height: height))
+        out.lockFocus()
+        NSGraphicsContext.current?.imageInterpolation = .high
+        NSImage(cgImage: ink, size: NSSize(width: ink.width, height: ink.height))
+            .draw(in: NSRect(x: 0, y: 0, width: max(width, 1), height: height))
+        out.unlockFocus()
+        return out
+    }
+
     private func setupMenuBar() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
-            let config = NSImage.SymbolConfiguration(pointSize: Self.statusIconPointSize,
-                                                     weight: .regular)
-            button.image = NSImage(systemSymbolName: "camera.viewfinder",
-                                   accessibilityDescription: "Capit")?
-                .withSymbolConfiguration(config)
+            button.image = Self.statusBarIcon()
             button.image?.isTemplate = true
+            button.image?.accessibilityDescription = "Capit"
         }
 
         let menu = NSMenu()
