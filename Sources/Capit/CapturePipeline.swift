@@ -185,16 +185,13 @@ enum CaptureClipboard {
     /// PNG only, deliberately: the previous version also encoded an uncompressed TIFF, which sat on
     /// the pasteboard (47 MB at 4K, 80 MB at 5K) until the next copy and cost another encode. Every
     /// macOS app that accepts a pasted image accepts PNG.
-    static func copy(png: Data, into pasteboard: NSPasteboard? = nil) {
+    static func copy(png: Data) {
         guard isEnabled else { return }
         // Tracked like the file writes, so quitting waits for a copy that is still queued instead of
-        // dropping it. `pasteboard` defaults to nil and `.general` is resolved inside the main-actor
-        // hop: as a default argument it would be evaluated on whatever thread called in — and
-        // `NSPasteboard.general` is main-thread only.
-        nonisolated(unsafe) let board = pasteboard          // main-actor only, stated to the compiler
+        // dropping it. `.general` is resolved inside the main-actor hop, where NSPasteboard lives.
         CaptureWriter.schedule {
             await MainActor.run {
-                let board = board ?? .general
+                let board = NSPasteboard.general
                 board.clearContents()
                 let item = NSPasteboardItem()
                 item.setData(png, forType: .png)
@@ -211,6 +208,8 @@ enum CaptureWriter {
         let id: UUID
         let task: Task<Void, Never>
     }
+    /// How long quitting will wait for writes. Nothing ever chose another value.
+    private static let shutdownWriteTimeout: TimeInterval = 8
     private static let lock = NSLock()
     private static var entries: [Entry] = []
 
@@ -238,8 +237,8 @@ enum CaptureWriter {
     /// instead of racing `Task.value` inside a `withTaskGroup`, because a task group waits for all of
     /// its children on exit and `await task.value` ignores cancellation — the "timeout" branch would
     /// have returned, then the group would still have waited for the stuck write forever.
-    static func waitForPending(timeout: TimeInterval = 8) async {
-        let deadline = Date().addingTimeInterval(timeout)
+    static func waitForPending() async {
+        let deadline = Date().addingTimeInterval(shutdownWriteTimeout)
         while !snapshot().isEmpty {
             guard Date() < deadline else { return }
             try? await Task.sleep(nanoseconds: 20_000_000)   // 20 ms: quiet, and short next to a write

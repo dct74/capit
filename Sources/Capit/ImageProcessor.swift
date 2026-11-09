@@ -178,11 +178,15 @@ enum ImageProcessor {
     /// Small preview thumbnail (never upscales). The full-resolution PNG already lives on disk,
     /// so the on-screen preview uses this instead of retaining a full-size screenshot.
     /// 2048 px covers the preview size (1/8 screen) even on 6K/8K Retina displays.
-    static func thumbnail(from image: CGImage, maxPixel: Int = 2048) -> CGImage? {
+    /// Longest side of the preview thumbnail. Nothing ever asked for another size, so this is a
+    /// constant rather than a parameter that only ever took its default.
+    private static let thumbnailMaxPixel = 2048
+
+    static func thumbnail(from image: CGImage) -> CGImage? {
         let w = image.width, h = image.height
         let longest = max(w, h)
         guard longest > 0 else { return nil }
-        let scale = min(1.0, CGFloat(maxPixel) / CGFloat(longest))
+        let scale = min(1.0, CGFloat(thumbnailMaxPixel) / CGFloat(longest))
         let tw = max(1, Int((CGFloat(w) * scale).rounded()))
         let th = max(1, Int((CGFloat(h) * scale).rounded()))
         guard let ctx = CGContext(data: nil, width: tw, height: th,

@@ -6,14 +6,17 @@ import CoreGraphics
 /// Exponent n: 2 = circle; n≈3–5 approximates macOS continuous corners.
 enum SquirclePath {
 
+    /// Points sampled per corner. The two variants used to take it only to forward it to each other,
+    /// and no caller ever chose a value, so it is a constant.
+    private static let samplesPerCorner = 64
+
     /// Returns a CGPath enclosing the rounded-rectangle interior.
-    static func cgPath(in rect: CGRect, radius: CGFloat, exponent: CGFloat,
-                       samplesPerCorner: Int = 64) -> CGPath {
+    static func cgPath(in rect: CGRect, radius: CGFloat, exponent: CGFloat) -> CGPath {
         let w = Double(rect.width), h = Double(rect.height)
         let r = Double(max(0, min(radius, CGFloat(min(rect.width, rect.height)) / 2)))
         guard r > 0, w > 0, h > 0 else { return CGPath(rect: rect, transform: nil) }
         let n = Double(max(0.1, exponent))
-        let steps = max(4, samplesPerCorner)
+        let steps = max(4, Self.samplesPerCorner)
 
         let corners: [(Double, Double, Double, Double, Double, Double)] = [
             (rect.minX, rect.minY, 1, 0, 0, 1),   // bottom-left
@@ -46,10 +49,8 @@ enum SquirclePath {
     }
 
     /// NSBezierPath variant (for AppKit drawing).
-    static func path(in rect: CGRect, radius: CGFloat, exponent: CGFloat,
-                     samplesPerCorner: Int = 64) -> NSBezierPath {
-        let cg = cgPath(in: rect, radius: radius, exponent: exponent,
-                        samplesPerCorner: samplesPerCorner)
+    static func path(in rect: CGRect, radius: CGFloat, exponent: CGFloat) -> NSBezierPath {
+        let cg = cgPath(in: rect, radius: radius, exponent: exponent)
         let bp = NSBezierPath()
         cg.applyWithBlock { element in
             let pts = element.pointee.points

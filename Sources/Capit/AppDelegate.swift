@@ -1,6 +1,5 @@
 import Cocoa
 import Carbon
-import UniformTypeIdentifiers
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
