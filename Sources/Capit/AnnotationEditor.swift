@@ -1086,7 +1086,7 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
     /// Applies corners and shadow when this document still needs them. Every write goes through
     /// here, so the "decorate or not" decision exists once.
     private func writtenImage(_ source: CGImage) -> CGImage {
-        needsFinishing ? (ImageProcessor.finished(source, radiusRatio: radiusRatio) ?? source) : source
+        needsFinishing ? ImageProcessor.finished(source, radiusRatio: radiusRatio) : source
     }
 
     /// Lands the un-annotated capture when the editor is closed — or the app quits — without saving.

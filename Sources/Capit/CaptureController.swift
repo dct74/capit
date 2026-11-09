@@ -318,7 +318,7 @@ final class CaptureController {
                 do {
                     if !FileManager.default.fileExists(atPath: productURL.path) {
                         let product = needsFinishing
-                            ? (ImageProcessor.finished(image, radiusRatio: radiusRatio) ?? image) : image
+                            ? ImageProcessor.finished(image, radiusRatio: radiusRatio) : image
                         try CapturePipeline.write(image: product, to: productURL)
                     }
                     // The destination was made unique at capture time, but a file could have
@@ -360,7 +360,7 @@ final class CaptureController {
         CaptureWriter.schedule {
             defer { pending.markProductFinished() }
             guard !pending.isCancelled else { return }
-            let product = needsFinishing ? (ImageProcessor.finished(image, radiusRatio: radiusRatio) ?? image) : image
+            let product = needsFinishing ? ImageProcessor.finished(image, radiusRatio: radiusRatio) : image
             // One PNG encode serves the clipboard and the file (two encodes used to run here).
             let png = try? CapturePipeline.encodePNG(product)
             if let png { CaptureClipboard.copy(png: png) }

@@ -33,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         runRealPathSelfTestIfRequested()
         runSampleRenderIfRequested()
         runMenuBarSelfTestIfRequested()
+        runFinishSelfTestIfRequested()
 #endif
     }
 
@@ -89,6 +90,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
 #if DEBUG
+    /// `CAPIT_FINISH_TEST=1`: checks that the decoration is corners *plus* a shadow.
+    ///
+    /// This exists because clipping and shadowing were once folded into one pass, and `clip()` clips
+    /// the shadow too — the shipped result was a rounded picture with no shadow. The check pins the
+    /// output to the two-step composition (`windowWithShadow` then `applyingRoundedCorners`), which is
+    /// the look that was signed off, and reports the shadow's presence as a number.
+    private func runFinishSelfTestIfRequested() {
+        guard ProcessInfo.processInfo.environment["CAPIT_FINISH_TEST"] == "1" else { return }
+        let w = 640, h = 400
+        let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+        ctx.setFillColor(CGColor(colorSpace: cs, components: [0.9, 0.9, 0.95, 1])!)
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        guard let source = ctx.makeImage(),
+              let rounded = ImageProcessor.applyingRoundedCorners(to: source, radiusRatio: 0.038),
+              let expected = ImageProcessor.windowWithShadow(content: rounded) else {
+            print("[finish] could not build the reference — WRONG"); fflush(stdout); return
+        }
+        let out = ImageProcessor.finished(source, radiusRatio: 0.038)
+        print("[finish] \(out.width)x\(out.height) (input \(w)x\(h)) padding=\(out.width > w && out.height > h)")
+
+        func pixels(_ img: CGImage) -> [UInt8] {
+            var b = [UInt8](repeating: 0, count: img.width * img.height * 4)
+            b.withUnsafeMutableBytes { raw in
+                guard let c = CGContext(data: raw.baseAddress, width: img.width, height: img.height,
+                                        bitsPerComponent: 8, bytesPerRow: img.width * 4, space: cs,
+                                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+                c.draw(img, in: CGRect(x: 0, y: 0, width: img.width, height: img.height))
+            }
+            return b
+        }
+        let a = pixels(out), b = pixels(expected)
+        var differences = 0, partial = 0
+        if a.count == b.count {
+            for i in stride(from: 3, to: a.count, by: 4) {
+                if a[i] != b[i] { differences += 1 }
+                if a[i] > 0 && a[i] < 255 { partial += 1 }
+            }
+        }
+        // The shadow is what makes the soft alpha ring: without it only the picture's antialiased
+        // edge is partial, which is a couple of thousand pixels, not tens of thousands.
+        print("[finish] differs-from-reference=\(differences) soft-alpha-pixels=\(partial) "
+              + (a.count == b.count && differences == 0 && partial > 20_000 ? "ok" : "WRONG"))
+        fflush(stdout)
+    }
+
     /// Prints the menu bar glyph as ASCII, so "is the camera actually there?" can be answered from a
     /// script rather than by squinting at the bar.
     private static func dumpASCII(_ image: NSImage) {
