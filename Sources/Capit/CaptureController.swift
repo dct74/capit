@@ -69,12 +69,25 @@ final class IdleAutoQuit {
 private final class PendingCapture {
     private let lock = NSLock()
     private var done = false
+    private var productFinished = false
     var isCancelled: Bool {
         lock.lock(); defer { lock.unlock() }
         return done
     }
     func cancel() {
         lock.lock(); done = true; lock.unlock()
+    }
+    /// Marks the decorating write as finished (successfully or not), so landing knows it may look at
+    /// the temp file instead of racing the writer.
+    func markProductFinished() {
+        lock.lock(); productFinished = true; lock.unlock()
+    }
+    /// Waits for the decorating write, bounded: landing must not block forever on a writer that died.
+    func waitForProduct(deadline: Date) async {
+        while !productFinished {
+            guard Date() < deadline else { return }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
     }
 }
 
@@ -86,6 +99,8 @@ final class CaptureController {
     private init() {}
 
     private var busy = false
+    /// The `screencapture -i` process while a selection is on screen, so quitting can end it.
+    private var interactiveProcess: Process?
 
     // MARK: - Entry points (menu)
 
@@ -174,21 +189,41 @@ final class CaptureController {
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
             proc.arguments = ["-i", "-x", url.path]
-            proc.terminationHandler = { p in
-                let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
-                let size = (attrs?[.size] as? NSNumber)?.intValue ?? 0
+            proc.terminationHandler = { [weak self] p in
+                // The handler runs on a non-main thread; the property is main-actor isolated.
+                Task { @MainActor in self?.interactiveProcess = nil }
+                // A cancelled selection leaves no file and exits non-zero — that is the normal way
+                // out. Anything else that keeps us from reading the file is a real failure and must
+                // not be reported as "the user cancelled", which the caller swallows silently.
+                let size: Int
+                do {
+                    let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+                    size = (attrs[.size] as? NSNumber)?.intValue ?? 0
+                } catch {
+                    cont.resume(throwing: p.terminationStatus == 0 ? error : CaptureError.cancelled)
+                    return
+                }
                 if p.terminationStatus == 0 && size > 0 {
                     cont.resume()
                 } else {
                     cont.resume(throwing: CaptureError.cancelled)
                 }
             }
+            interactiveProcess = proc
             do {
                 try proc.run()
             } catch {
+                interactiveProcess = nil
                 cont.resume(throwing: error)
             }
         }
+    }
+
+    /// Terminates a selection that is still on screen. Called when the app is about to quit: the
+    /// child would otherwise outlive us and leave its crosshair over the desktop.
+    func cancelInteractiveCapture() {
+        interactiveProcess?.terminate()   // the termination handler resumes the continuation
+        interactiveProcess = nil
     }
 
     /// Opens the annotation editor on a user-imported image (jpg/png). Images that are
@@ -259,30 +294,43 @@ final class CaptureController {
         let productURL = pendingTempURL()
         let pending = PendingCapture()
         let thumb = ImageProcessor.thumbnail(from: image) ?? image
-        PreviewPresenter.shared.present(image: thumb, screen: screen,
-            onExpire: { [weak self] in
-                CaptureWriter.schedule {
-                    do {
-                        // Normally the product is already on disk; fall back to decorating the raw
-                        // capture if the write had not finished (or failed).
-                        if !FileManager.default.fileExists(atPath: productURL.path) {
-                            let product = needsFinishing
-                                ? ImageProcessor.finished(image, radiusRatio: radiusRatio) : image
-                            try CapturePipeline.write(image: product, to: productURL)
-                        }
-                        // The destination was made unique at capture time, but a file could have
-                        // appeared since; never replace one blindly.
-                        let destination = CapturePipeline.uniqueOnDisk(finalURL)
-                        try CapturePipeline.atomicReplace(productURL, destination)
-                        // The clipboard already holds this image from capture time; rewriting it
-                        // here would silently clobber whatever the user copied in the meantime.
-                        NSLog("[Capit] 已保存到桌面: \(destination.path)")
-                    } catch {
-                        await MainActor.run { self?.presentError(error) }
+
+        /// Puts the capture on the desktop: waits for the decorating write rather than racing it,
+        /// decorates the raw capture itself only if that write produced nothing, then moves the
+        /// result to a name that is still free.
+        func land() {
+            CaptureWriter.schedule { [weak self] in
+                await pending.waitForProduct(deadline: Date().addingTimeInterval(6))
+                do {
+                    if !FileManager.default.fileExists(atPath: productURL.path) {
+                        let product = needsFinishing
+                            ? ImageProcessor.finished(image, radiusRatio: radiusRatio) : image
+                        try CapturePipeline.write(image: product, to: productURL)
                     }
+                    // The destination was made unique at capture time, but a file could have
+                    // appeared since; never replace one blindly.
+                    let destination = CapturePipeline.uniqueOnDisk(finalURL)
+                    try CapturePipeline.atomicReplace(productURL, destination)
+                    // The clipboard already holds this image from capture time; rewriting it here
+                    // would silently clobber whatever the user copied in the meantime.
+                    NSLog("[Capit] 已保存到桌面: \(destination.path)")
+                } catch {
+                    await MainActor.run { self?.presentError(error) }
                 }
-            },
+            }
+        }
+
+        PreviewPresenter.shared.present(image: thumb, screen: screen,
+            onExpire: { land() },
             onOpen: { [weak self] in
+                if let existing = AnnotationHolder.shared.active {
+                    // Never open a second editor: `present()` replaces the only strong reference to
+                    // the first, whose window would then outlive its delegate and skip
+                    // `windowWillClose`. Land this capture like an expired preview instead.
+                    existing.bringToFront()
+                    land()
+                    return
+                }
                 // The editor works from the raw capture; the product this capture was preparing is
                 // no longer needed, and its writer is told to stand down.
                 pending.cancel()
@@ -294,6 +342,7 @@ final class CaptureController {
 
         // Decorate and copy off the main thread, so the preview above is not held up by it.
         CaptureWriter.schedule {
+            defer { pending.markProductFinished() }
             guard !pending.isCancelled else { return }
             let product = needsFinishing ? ImageProcessor.finished(image, radiusRatio: radiusRatio) : image
             // One PNG encode serves the clipboard and the file (two encodes used to run here).

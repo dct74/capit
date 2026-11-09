@@ -47,6 +47,9 @@ enum ImageProcessor {
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
                                   bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+        // A nil-data context is not documented to be zeroed; the probe reads transparent corners, so
+        // it must start empty rather than trust whatever the allocation held.
+        ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
         guard let raw = ctx.data else { return false }
         let p = raw.assumingMemoryBound(to: UInt8.self)
@@ -103,6 +106,8 @@ enum ImageProcessor {
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
             return nil
         }
+        // Same reason as the heuristic above: do not rely on a fresh allocation being zeroed.
+        ctx.clear(CGRect(x: 0, y: 0, width: CGFloat(h), height: CGFloat(w)))
         // Unflipped space: translate to the far side, then turn the picture so that its old top edge
         // ends up on the left — which is what "counter-clockwise" looks like.
         ctx.translateBy(x: CGFloat(h), y: 0)
@@ -160,6 +165,7 @@ enum ImageProcessor {
                                   bitsPerComponent: 8, bytesPerRow: 0,
                                   space: image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!,
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.clear(CGRect(x: 0, y: 0, width: tw, height: th))   // allocation is not documented as zeroed
         ctx.interpolationQuality = .high
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: tw, height: th))
         return ctx.makeImage()

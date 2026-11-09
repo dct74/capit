@@ -41,6 +41,20 @@ final class GlobalHotKeyManager {
         return true
     }
 
+    deinit {
+        // The handler holds an unretained pointer to this object: leaving it installed past our
+        // lifetime would let a later hot key event call into freed memory.
+        if let ref = eventHandlerRef { RemoveEventHandler(ref) }
+    }
+
+    /// Removes the installed handler. Hot keys stop arriving after this.
+    func removeHandler() {
+        guard let ref = eventHandlerRef else { return }
+        RemoveEventHandler(ref)
+        eventHandlerRef = nil
+        installed = false
+    }
+
     func unregister(id: UInt32) {
         if let ref = hotKeyRefs.removeValue(forKey: id) {
             UnregisterEventHotKey(ref)

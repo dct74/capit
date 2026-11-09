@@ -1092,7 +1092,10 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         guard !isImported, !didSave, !isSaving, !rawLandingQueued, let url = fileURL else { return }
         rawLandingQueued = true
         let snapshot = writtenImage(image)
-        CaptureWriter.schedule { _ = try? CapturePipeline.write(image: snapshot, to: url) }
+        CaptureWriter.schedule {
+            do { try CapturePipeline.write(image: snapshot, to: url) }
+            catch { NSLog("[Capit] 未能落盘未标注的截图：\(error.localizedDescription)") }
+        }
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -1286,12 +1289,16 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
             // overwrites its source file.
             let ext = fileURL.pathExtension.lowercased()
             if isImported && (ext == "jpg" || ext == "jpeg") {
-                url = fileURL.deletingPathExtension().appendingPathExtension("png")
+                // Converting next to the source must not clobber an unrelated PNG already sitting
+                // under the same name — this target was never reserved.
+                url = CapturePipeline.uniqueOnDisk(fileURL.deletingPathExtension().appendingPathExtension("png"))
             } else {
-                url = fileURL
+                url = fileURL        // re-saving an import (or its own capture) replaces it on purpose
             }
         } else {
-            url = CapturePipeline.desktopURL()
+            // Reserved at capture time, but a file could have taken the name since; never replace
+            // one blindly (the landing path makes the same check).
+            url = CapturePipeline.uniqueOnDisk(CapturePipeline.desktopURL())
         }
         isSaving = true
         let snapshot = out
@@ -1335,7 +1342,8 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
                 let snapshot = writtenImage(image)
                 CaptureWriter.schedule {
                     let destination = CapturePipeline.uniqueOnDisk(url)
-                    _ = try? CapturePipeline.write(image: snapshot, to: destination)
+                    do { try CapturePipeline.write(image: snapshot, to: destination) }
+                    catch { NSLog("[Capit] 保存失败后的兜底落盘也失败了：\(error.localizedDescription)") }
                 }
             }
         }
@@ -1509,6 +1517,9 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private var editingTextIndex: Int?
     private var pendingTextStart: CGPoint = .zero
     private var pendingTextColor: NSColor = .black
+    /// Set when a live font-size change has already recorded an undo snapshot for this edit: the
+    /// slider fires continuously, and one snapshot per gesture is enough.
+    private var textSizeEditPushed = false
     private var swallowCommitClick = false
 
     func beginText(at p: CGPoint, editingIndex: Int?) {
@@ -1517,6 +1528,7 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         let color = editingIndex.map { shapes[$0].color } ?? strokeColor
         pendingTextStart = p
         pendingTextColor = color
+        textSizeEditPushed = false
         editingTextIndex = editingIndex
         // The shape being edited is skipped while it draws (see draw()), rather than hidden by
         // setting its opacity to 0: mutating the model mid-edit meant a commit that changed nothing
@@ -1585,7 +1597,9 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
             var r = field.frame
             r.size.height = size + 8
             field.frame = r
-            if let i = editingTextIndex, i < shapes.count {
+            if let i = editingTextIndex, i < shapes.count, abs(shapes[i].fontSize - size) > 0.001 {
+                // Without this the size change had no snapshot of its own, so undo jumped past it.
+                if !textSizeEditPushed { pushState(); textSizeEditPushed = true }
                 shapes[i].fontSize = size
             }
             controlTextDidChange(Notification(name: NSText.didChangeNotification, object: field))
@@ -1637,17 +1651,21 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
         strokeColor = colorFor(kind)
         strokeWidth = defaultWidth(for: kind)
         // Selecting a shape shows *its* width and dash, and keeps them as the default for the next
-        // one — resetting to 2 here silently threw away a width the user had just picked.
-        if let i = selectedIndex, i < shapes.count, shapes[i].kind == kind {
-            strokeWidth = shapes[i].strokeWidth
-            lineDashed = shapes[i].dashed
+        // one — resetting them here silently threw away what the user had just picked.
+        let adopted = selectedIndex.flatMap { i in
+            i < shapes.count && shapes[i].kind == kind ? shapes[i] : nil
+        }
+        if let adopted {
+            strokeWidth = adopted.strokeWidth
+            lineDashed = adopted.dashed
+        } else {
+            lineDashed = false   // a fresh tool starts solid
         }
         spotlightOpacityEditPushed = false
         if kind == .spotlight, let i = selectedIndex, i < shapes.count,
            shapes[i].kind == .spotlight {
             spotlightOpacity = shapes[i].opacity
         }
-        lineDashed = false   // line style falls back to solid when switching tools/shapes
         notifyWidthDisplay()
         onActiveTool?(kind)
         refreshCursorRects()

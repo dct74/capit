@@ -9,6 +9,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var autoQuitItem: NSMenuItem?
     private var copyToClipboardItem: NSMenuItem?
     private var hideMenuBarItem: NSMenuItem?
+    /// The two capture items, kept so a hot key the system already owns can be dropped from the menu
+    /// instead of being advertised as working.
+    private var fullScreenItem: NSMenuItem?
+    private var regionItem: NSMenuItem?
     #if DEBUG
     private var selftestController: InteractiveCaptureController?
     #endif
@@ -33,12 +37,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // A selection still on screen must not outlive us: the child process would keep its
+        // crosshair over the desktop.
+        CaptureController.shared.cancelInteractiveCapture()
         hotKeys.unregister(id: fullID9)
         hotKeys.unregister(id: regionID0)
         hotKeys.unregister(id: fullID3)
         hotKeys.unregister(id: regionID4)
         hotKeys.unregister(id: editorID)
         hotKeys.unregister(id: menuBarID)
+        hotKeys.removeHandler()
     }
 
     /// Lets any in-flight capture write finish before the app quits, so a just-landed
@@ -70,10 +78,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let cmdShift = UInt32(cmdKey) | UInt32(shiftKey)
         _ = hotKeys.register(id: fullID9, keyCode: 25, modifiers: cmdShift)    // '9'
         _ = hotKeys.register(id: regionID0, keyCode: 29, modifiers: cmdShift)  // '0'
-        _ = hotKeys.register(id: fullID3, keyCode: 20, modifiers: cmdShift)    // '3'
-        _ = hotKeys.register(id: regionID4, keyCode: 21, modifiers: cmdShift)  // '4'
         _ = hotKeys.register(id: editorID, keyCode: 14, modifiers: UInt32(cmdKey))  // ⌘E
         _ = hotKeys.register(id: menuBarID, keyCode: 46, modifiers: cmdShift)       // ⇧⌘M
+        // ⇧⌘3 / ⇧⌘4 are macOS's own screenshot shortcuts, so these registrations often fail. The menu
+        // must then stop showing them as if they worked; the ⇧⌘9 / ⇧⌘0 pair above does.
+        let full3 = hotKeys.register(id: fullID3, keyCode: 20, modifiers: cmdShift)     // '3'
+        let region4 = hotKeys.register(id: regionID4, keyCode: 21, modifiers: cmdShift) // '4'
+        if !full3 { fullScreenItem?.keyEquivalent = ""; fullScreenItem?.keyEquivalentModifierMask = [] }
+        if !region4 { regionItem?.keyEquivalent = ""; regionItem?.keyEquivalentModifierMask = [] }
     }
 
 #if DEBUG
@@ -379,11 +391,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                               action: #selector(captureFullScreen),
                               keyEquivalent: "3")
         full.keyEquivalentModifierMask = [.command, .shift]
+        fullScreenItem = full
         menu.addItem(full)
         let region = NSMenuItem(title: "区域 / 窗口截图",
                                 action: #selector(captureInteractive),
                                 keyEquivalent: "4")
         region.keyEquivalentModifierMask = [.command, .shift]
+        regionItem = region
         menu.addItem(region)
         menu.addItem(.separator())
         let editor = NSMenuItem(title: "编辑器",

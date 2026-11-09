@@ -192,15 +192,21 @@ enum CaptureClipboard {
     /// PNG only, deliberately: the previous version also encoded an uncompressed TIFF, which sat on
     /// the pasteboard (47 MB at 4K, 80 MB at 5K) until the next copy and cost another encode. Every
     /// macOS app that accepts a pasted image accepts PNG.
-    static func copy(png: Data, into pasteboard: NSPasteboard = .general) {
+    static func copy(png: Data, into pasteboard: NSPasteboard? = nil) {
         guard isEnabled else { return }
-        // NSPasteboard is main-thread only; this states that to the compiler.
-        nonisolated(unsafe) let board = pasteboard
-        Task { @MainActor in
-            board.clearContents()
-            let item = NSPasteboardItem()
-            item.setData(png, forType: .png)
-            board.writeObjects([item])
+        // Tracked like the file writes, so quitting waits for a copy that is still queued instead of
+        // dropping it. `pasteboard` defaults to nil and `.general` is resolved inside the main-actor
+        // hop: as a default argument it would be evaluated on whatever thread called in — and
+        // `NSPasteboard.general` is main-thread only.
+        nonisolated(unsafe) let board = pasteboard          // main-actor only, stated to the compiler
+        CaptureWriter.schedule {
+            await MainActor.run {
+                let board = board ?? .general
+                board.clearContents()
+                let item = NSPasteboardItem()
+                item.setData(png, forType: .png)
+                board.writeObjects([item])
+            }
         }
     }
 
@@ -242,26 +248,18 @@ enum CaptureWriter {
         return entries
     }
 
-    /// Awaits every write that is in flight (and any started meanwhile) — used before quitting.
-    /// Bounded by `timeout` so a stuck write can't hang the quit indefinitely.
-    /// Awaits in-flight writes, bounded in total: a single write that never completes used to block
-    /// quit forever, because the deadline was only checked between items.
+    /// Awaits every write that is in flight (and any started meanwhile) — used before quitting, so a
+    /// capture that is just landing is not dropped.
+    ///
+    /// Bounded in *total*: the deadline has to hold even when a write never finishes. This polls
+    /// instead of racing `Task.value` inside a `withTaskGroup`, because a task group waits for all of
+    /// its children on exit and `await task.value` ignores cancellation — the "timeout" branch would
+    /// have returned, then the group would still have waited for the stuck write forever.
     static func waitForPending(timeout: TimeInterval = 8) async {
         let deadline = Date().addingTimeInterval(timeout)
-        while true {
-            let list = snapshot()
-            if list.isEmpty { return }
-            for e in list {
-                let remaining = deadline.timeIntervalSinceNow
-                if remaining <= 0 { return }
-                await withTaskGroup(of: Void.self) { group in
-                    group.addTask { await e.task.value }
-                    group.addTask { try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000)) }
-                    await group.next()          // whichever finishes first
-                    group.cancelAll()
-                }
-            }
-            for e in list { remove(e.id) }
+        while !snapshot().isEmpty {
+            guard Date() < deadline else { return }
+            try? await Task.sleep(nanoseconds: 20_000_000)   // 20 ms: quiet, and short next to a write
         }
     }
 }
