@@ -27,9 +27,8 @@ final class PreviewWindowController: NSObject {
         let sf = screen.frame
         let size = NSSize(width: sf.width / 8, height: sf.height / 8)
 
-        let margin: CGFloat = 0
-        let x = sf.maxX - margin - size.width
-        let y = sf.minY + margin
+        let x = sf.maxX - size.width
+        let y = sf.minY
         let frame = NSRect(x: x, y: y, width: size.width, height: size.height)
 
         let p = NSPanel(contentRect: frame,
@@ -70,11 +69,7 @@ final class PreviewWindowController: NSObject {
     /// Lands a still-pending (unclicked) preview's capture and hides it. Called when a newer
     /// capture replaces this preview so the older capture isn't lost and only one preview is
     /// ever on screen.
-    func finalizePending() {
-        guard !dismissed else { return }
-        onExpire?()
-        dismiss()
-    }
+    func finalizePending() { timeout() }
 
     private func dismiss() {
         guard !dismissed else { return }

@@ -10,7 +10,7 @@ private enum SaveOutcome {
 
 /// Tools that carry a dash style. One definition: the canvas and the toolbar each had their own copy,
 /// so adding a kind would have made "can set dashes" and "shows the dash control" disagree.
-let outlineKinds: Set<AnnotationShape.Kind> = [.rect, .ellipse, .arrow, .line]
+private let outlineKinds: Set<AnnotationShape.Kind> = [.rect, .ellipse, .arrow, .line]
 
 /// Tools whose annotations carry a stroke width (and show the width popup).
 private let strokeWidthKinds: Set<AnnotationShape.Kind> =
@@ -713,7 +713,7 @@ private func renderShape(_ shape: AnnotationShape) {
         // The outer boundary is the *document* edge, deliberately square. A raw capture's document
         // is the picture, and its corners are rounded later, when the file is finished; a rounded
         // boundary drawn here could never coincide with those corners (the finished radius is
-        // max(14 px, 0.042 x shorter side), not the annotation radius) and it left lit slivers
+        // max(minCornerRadiusPx, radiusRatio x shorter side), not the annotation radius) and it left lit slivers
         // inside them. Letting the finish step do the rounding makes the two coincide exactly, and
         // the shadow is added outside afterwards, so it is never dimmed.
         //
@@ -1718,7 +1718,8 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     private func selectionChanged() {
         colorEditHistoryPushed = false
         // Selecting only *shows* a shape's width (view only) — it never changes the tool
-        // default. Deselecting resets the active width back to the tool default (3 / 16).
+        // default. Deselecting resets the active width back to the tool default (2, or 16 for the
+        // highlighter) — see `defaultWidth(for:)`.
         if selectedIndex == nil {
             strokeWidth = defaultWidth(for: currentKind)
         }

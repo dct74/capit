@@ -180,13 +180,6 @@ enum CaptureClipboard {
         set { UserDefaults.standard.set(newValue, forKey: defaultsKey) }
     }
 
-    /// Copies `image` as PNG and TIFF — between them the two flavours apps actually ask for.
-    ///
-    /// The encodes run off the main thread (a 4K PNG is ~100 ms, which would be a visible hitch
-    /// on capture) and only the pasteboard write hops back, because NSPasteboard is main-thread
-    /// only. Encoding runs off-main rather than using NSBitmapImageRep, so nothing here needs
-    /// AppKit off the main thread. `pasteboard` is injectable so tests can use a private one
-    /// instead of clobbering the user's clipboard.
     /// Puts already-encoded PNG bytes on the pasteboard.
     ///
     /// PNG only, deliberately: the previous version also encoded an uncompressed TIFF, which sat on
@@ -207,16 +200,6 @@ enum CaptureClipboard {
                 item.setData(png, forType: .png)
                 board.writeObjects([item])
             }
-        }
-    }
-
-    /// Convenience for callers that only have an image: encodes once and hands the bytes over.
-    static func copy(_ image: CGImage, into pasteboard: NSPasteboard = .general) {
-        guard isEnabled else { return }
-        nonisolated(unsafe) let board = pasteboard
-        Task.detached(priority: .utility) {
-            guard let png = try? CapturePipeline.encodePNG(image) else { return }
-            copy(png: png, into: board)
         }
     }
 }

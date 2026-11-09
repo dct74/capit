@@ -486,10 +486,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Menu → 关于: show the current version.
     @objc private func showAbout() {
         let info = Bundle.main.infoDictionary
-        let short = info?["CFBundleShortVersionString"] as? String ?? "1.5.2"
+        let short = info?["CFBundleShortVersionString"] as? String
         let alert = NSAlert()
         alert.messageText = "关于 Capit"
-        alert.informativeText = "版本 v\(short)\n\n菜单栏截图标注工具。"
+        // No literal fallback: a hard-coded number goes stale silently, and reporting a wrong version
+        // is worse than reporting none.
+        alert.informativeText = (short.map { "版本 v\($0)\n\n" } ?? "") + "菜单栏截图标注工具。"
         alert.alertStyle = .informational
         alert.addButton(withTitle: "好")
         NSApp.activate(ignoringOtherApps: true)
