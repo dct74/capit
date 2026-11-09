@@ -1086,7 +1086,7 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
     /// Applies corners and shadow when this document still needs them. Every write goes through
     /// here, so the "decorate or not" decision exists once.
     private func writtenImage(_ source: CGImage) -> CGImage {
-        needsFinishing ? ImageProcessor.finished(source, radiusRatio: radiusRatio) : source
+        needsFinishing ? (ImageProcessor.finished(source, radiusRatio: radiusRatio) ?? source) : source
     }
 
     /// Lands the un-annotated capture when the editor is closed — or the app quits — without saving.
@@ -1098,9 +1098,17 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         guard !isImported, !didSave, !isSaving, !rawLandingQueued, let url = fileURL else { return }
         rawLandingQueued = true
         let snapshot = writtenImage(image)
-        CaptureWriter.schedule {
-            do { try CapturePipeline.write(image: snapshot, to: url) }
-            catch { NSLog("[Capit] 未能落盘未标注的截图：\(error.localizedDescription)") }
+        CaptureWriter.schedule { [weak self] in
+            do {
+                try CapturePipeline.write(image: snapshot, to: url)
+            } catch {
+                NSLog("[Capit] 未能落盘未标注的截图：\(error.localizedDescription)")
+                // The user closed the editor without saving; this write was the only way the capture
+                // reached the disk, so failing quietly would lose it without a word.
+                await MainActor.run {
+                    self?.presentSaveFailure(message: "未能保存截图：\(error.localizedDescription)")
+                }
+            }
         }
     }
 

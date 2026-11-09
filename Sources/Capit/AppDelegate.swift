@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let menuBarID: UInt32 = 6
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        CapturePipeline.clearTempDir()      // screenshots left behind by a crash or a kill
         setupMenuBar()
         registerGlobalHotKeys()
         IdleAutoQuit.shared.refresh()
@@ -461,27 +462,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         guard panel.runModal() == .OK, let url = panel.url,
               let nsImage = NSImage(contentsOf: url),
-              let cg = Self.normalizedCGImage(from: nsImage) else { return }
+              // ImageIO's own conversion bakes the EXIF orientation into the pixels while keeping the
+              // source's colour space and bit depth. Redrawing through a device-RGB bitmap used to
+              // flatten Display P3 to sRGB and 16-bit to 8-bit, and it is what the interactive
+              // capture path already does.
+              let cg = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
         CaptureController.shared.openImportedImage(cg, sourceURL: url)
-    }
-
-    /// Bakes any EXIF orientation into the pixels so a rotated JPEG doesn't come in sideways.
-    private static func normalizedCGImage(from image: NSImage) -> CGImage? {
-        let px = image.representations.first?.pixelsWide ?? Int(image.size.width)
-        let py = image.representations.first?.pixelsHigh ?? Int(image.size.height)
-        guard px > 0, py > 0,
-              let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: px, pixelsHigh: py,
-                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
-                                         isPlanar: false, colorSpaceName: .deviceRGB,
-                                         bytesPerRow: 0, bitsPerPixel: 0),
-              let gc = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = gc
-        gc.imageInterpolation = .high
-        image.draw(in: NSRect(x: 0, y: 0, width: px, height: py))
-        gc.flushGraphics()
-        NSGraphicsContext.restoreGraphicsState()
-        return rep.cgImage
     }
 
     /// Menu → 关于: show the current version.

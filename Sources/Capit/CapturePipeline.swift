@@ -19,6 +19,14 @@ enum CapturePipeline {
         return dir
     }()
 
+    /// Empties the pending dir. A crash or a kill leaves whole screenshots in it, and nothing else
+    /// would ever remove them; called once at launch, when nothing can be in flight.
+    static func clearTempDir() {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil) else { return }
+        for item in items { try? fm.removeItem(at: item) }
+    }
+
     /// The base file name for a capture.
     static func fileName(_ date: Date) -> String {
         let f = DateFormatter()
@@ -129,6 +137,8 @@ enum CapturePipeline {
         } else {
             try fm.moveItem(at: temp, to: destination)
         }
+        // A screenshot is the screen: rw-r--r-- lets every other account on the Mac read it.
+        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
     }
 
     /// Metadata worth carrying from a file being re-saved: the general dictionaries, minus anything
@@ -144,6 +154,13 @@ enum CapturePipeline {
             // Container-specific dictionaries describe the source file, not the PNG being written.
             if key == kCGImagePropertyJFIFDictionary || key == kCGImagePropertyHEICSDictionary
                 || key == kCGImagePropertyPNGDictionary { continue }
+            // The TIFF dictionary has its own Orientation. The pixels already carry the rotation by
+            // the time this runs, so keeping it made viewers rotate a second time.
+            if key == kCGImagePropertyTIFFDictionary, var tiff = value as? [CFString: Any] {
+                tiff.removeValue(forKey: kCGImagePropertyTIFFOrientation)
+                out[key] = tiff
+                continue
+            }
             out[key] = value
         }
         return out

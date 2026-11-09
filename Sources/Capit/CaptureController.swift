@@ -205,6 +205,10 @@ final class CaptureController {
                 }
                 if p.terminationStatus == 0 && size > 0 {
                     cont.resume()
+                } else if size > 0 {
+                    // It wrote something but failed: a full disk or an unwritable temp dir. Reporting
+                    // this as "cancelled" is what made the failure silent.
+                    cont.resume(throwing: CaptureError.imageWriteFailed)
                 } else {
                     cont.resume(throwing: CaptureError.cancelled)
                 }
@@ -242,6 +246,12 @@ final class CaptureController {
                 alreadyProcessed = await Task.detached(priority: .userInitiated) {
                     ImageProcessor.alreadyRoundedOrShadowed(image)
                 }.value
+            }
+            // The heuristic above can take a while on a large image; an editor may have opened in the
+            // meantime, and `present()` would replace the only strong reference to it.
+            if let existing = AnnotationHolder.shared.active {
+                existing.bringToFront()
+                return
             }
             // Decoration is deferred to save, like a capture; only an image that already has it
             // is flagged so it is not decorated twice.
@@ -303,11 +313,12 @@ final class CaptureController {
         /// result to a name that is still free.
         func land() {
             CaptureWriter.schedule { [weak self] in
+                defer { try? FileManager.default.removeItem(at: productURL) }   // no leftovers on failure
                 await pending.waitForProduct(deadline: Date().addingTimeInterval(6))
                 do {
                     if !FileManager.default.fileExists(atPath: productURL.path) {
                         let product = needsFinishing
-                            ? ImageProcessor.finished(image, radiusRatio: radiusRatio) : image
+                            ? (ImageProcessor.finished(image, radiusRatio: radiusRatio) ?? image) : image
                         try CapturePipeline.write(image: product, to: productURL)
                     }
                     // The destination was made unique at capture time, but a file could have
@@ -316,7 +327,9 @@ final class CaptureController {
                     try CapturePipeline.atomicReplace(productURL, destination)
                     // The clipboard already holds this image from capture time; rewriting it here
                     // would silently clobber whatever the user copied in the meantime.
-                    NSLog("[Capit] 已保存到桌面: \(destination.path)")
+                    // File name only: the full path carries the account name and is readable from the
+                    // unified log by any process.
+                    NSLog("[Capit] 已保存到桌面: \(destination.lastPathComponent)")
                 } catch {
                     await MainActor.run { self?.presentError(error) }
                 }
@@ -347,7 +360,7 @@ final class CaptureController {
         CaptureWriter.schedule {
             defer { pending.markProductFinished() }
             guard !pending.isCancelled else { return }
-            let product = needsFinishing ? ImageProcessor.finished(image, radiusRatio: radiusRatio) : image
+            let product = needsFinishing ? (ImageProcessor.finished(image, radiusRatio: radiusRatio) ?? image) : image
             // One PNG encode serves the clipboard and the file (two encodes used to run here).
             let png = try? CapturePipeline.encodePNG(product)
             if let png { CaptureClipboard.copy(png: png) }
