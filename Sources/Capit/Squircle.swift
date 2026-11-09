@@ -6,6 +6,16 @@ import CoreGraphics
 /// Exponent n: 2 = circle; n≈3–5 approximates macOS continuous corners.
 enum SquirclePath {
 
+    /// How big a corner is: a ratio of the shorter side, with a floor so small shapes keep a visible
+    /// curve (and a cap inside `cgPath` so it can never exceed half that side).
+    ///
+    /// Both the finished screenshot and the annotation shapes come through here. Their ratios and
+    /// floors differ on purpose — a 5K capture and a 120 pt box are two orders of magnitude apart, and
+    /// one ratio cannot serve both — but the rule itself exists once.
+    static func radius(in rect: CGRect, ratio: CGFloat, minimum: CGFloat) -> CGFloat {
+        max(minimum, min(rect.width, rect.height) * ratio)
+    }
+
     /// Points sampled per corner. The two variants used to take it only to forward it to each other,
     /// and no caller ever chose a value, so it is a constant.
     private static let samplesPerCorner = 64

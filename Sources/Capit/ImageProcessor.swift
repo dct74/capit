@@ -23,8 +23,8 @@ enum ImageProcessor {
     static func applyingRoundedCorners(to image: CGImage,
                                        radiusRatio: CGFloat = cornerRadiusRatio) -> CGImage? {
         let w = image.width, h = image.height
-        let shorter = CGFloat(min(w, h))
-        let radius = max(minCornerRadiusPx, shorter * radiusRatio)
+        let rect = CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h))
+        let radius = SquirclePath.radius(in: rect, ratio: radiusRatio, minimum: minCornerRadiusPx)
         // CoreGraphics only, deliberately: this runs on a background task (the capture path) and
         // AppKit drawing is not safe there. Verified byte-identical to the NSImage/NSBitmapImageRep
         // version it replaced, anti-aliased corner edges included.
@@ -33,7 +33,6 @@ enum ImageProcessor {
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
             return nil
         }
-        let rect = CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h))
         ctx.clear(rect)
         ctx.interpolationQuality = .high
         ctx.addPath(SquirclePath.cgPath(in: rect, radius: radius, exponent: cornerExponent))

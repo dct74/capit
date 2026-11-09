@@ -583,8 +583,10 @@ private var currentDocumentSize: CGSize = .zero
 /// their document is the picture itself and no content rect is needed.
 private var currentDocumentIsDecorated = false
 
+/// Annotation corners: 20% of the shorter side, at least 4 pt. Deliberately rounder than a screenshot's
+/// 6.6% — a drawn box is much smaller than a capture, and 6.6% of it is nearly a right angle.
 private func continuousRadius(for r: CGRect) -> CGFloat {
-    max(4, min(r.width, r.height) * 0.2)
+    SquirclePath.radius(in: r, ratio: 0.2, minimum: 4)
 }
 
 /// The box a text annotation occupies, used by the selection indicator, single-click hit testing and
