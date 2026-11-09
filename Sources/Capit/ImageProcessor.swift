@@ -5,8 +5,8 @@ import CoreGraphics
 enum ImageProcessor {
 
     /// Visual calibration knobs.
-    static let cornerRadiusRatio: CGFloat = 0.042    // region/window screenshots
-    static let cornerExponent: CGFloat = 3.0          // ~Apple continuous curve feel
+    static let cornerRadiusRatio: CGFloat = 0.038    // region/window screenshots
+    static let cornerExponent: CGFloat = 5.0          // ~Apple continuous curve feel
     static let minCornerRadiusPx: CGFloat = 14
 
     /// Continuous-corner (squircle) rounding, in the image's own orientation.
