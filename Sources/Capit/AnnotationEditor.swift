@@ -617,8 +617,8 @@ private func renderShape(_ shape: AnnotationShape) {
            let cg = NSGraphicsContext.current?.cgContext {
             let ring = CGMutablePath()
             ring.addPath(SquirclePath.cgPath(in: r.insetBy(dx: -w / 2, dy: -w / 2),
-                                             radius: rOut, exponent: 3.5))
-            ring.addPath(SquirclePath.cgPath(in: inner, radius: rIn, exponent: 3.5))
+                                             radius: rOut, exponent: ImageProcessor.cornerExponent))
+            ring.addPath(SquirclePath.cgPath(in: inner, radius: rIn, exponent: ImageProcessor.cornerExponent))
             color.setFill()
             cg.saveGState()
             cg.addPath(ring)
@@ -628,16 +628,17 @@ private func renderShape(_ shape: AnnotationShape) {
             // Dashes cannot be expressed as a filled ring, so they stroke; the radius is
             // compensated so the *outer* corner lands where the ring's would.
             let radius = max(0, rOut - w / 2)
-            let outline = SquirclePath.cgPath(in: r, radius: radius, exponent: 3.5)
+            let outline = SquirclePath.cgPath(in: r, radius: radius, exponent: ImageProcessor.cornerExponent)
             if shape.dashed, let cg = NSGraphicsContext.current?.cgContext {
                 // Anchored at the middle of each corner arc. SquirclePath's parameter is not arc
                 // length: its k = 0.5 sits almost on the straight edge (u = 0.5 r, v = 0.027 r), not
                 // at the visual corner. The point where u = v is k = 0.5^(1/n), which with the
-                // squircle exponent of 3.5 is about 0.82 of the way along the corner's samples.
+                // squircle exponent used for the corner is about 0.82 of the way along its samples
+                // (with n = 5; it moves with the exponent, hence the shared constant).
                 let points = polyline(of: outline)
                 let perCorner = points.count / 4
                 let steps = max(1, perCorner - 1)
-                let midK = pow(0.5, 1.0 / 3.5)
+                let midK = pow(0.5, 1.0 / ImageProcessor.cornerExponent)
                 let midStep = Int((Double(steps) * midK).rounded())
                 let anchors = (0..<4).map { $0 * perCorner + midStep }
                 strokeDashedOutline(points, anchors: anchors, dash: 8, period: 14,
@@ -645,7 +646,7 @@ private func renderShape(_ shape: AnnotationShape) {
             } else {
                 // NSBezierPath(cgPath:) is macOS 14+; the project targets 13, so the solid path is
                 // built the way it always was.
-                let path = SquirclePath.path(in: r, radius: radius, exponent: 3.5)
+                let path = SquirclePath.path(in: r, radius: radius, exponent: ImageProcessor.cornerExponent)
                 path.lineWidth = w
                 color.setStroke()
                 path.stroke()
@@ -726,7 +727,7 @@ private func renderShape(_ shape: AnnotationShape) {
         mask.addRect(document)
         mask.addPath(SquirclePath.cgPath(in: shape.rect,
                                         radius: continuousRadius(for: shape.rect),
-                                        exponent: 3.5))
+                                        exponent: ImageProcessor.cornerExponent))
         cg.saveGState()
         if currentDocumentIsDecorated, let picture = currentDocumentImage,
            let pictureMask = PictureShape.mask(of: picture) {
