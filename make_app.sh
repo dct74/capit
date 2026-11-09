@@ -66,21 +66,30 @@ codesign --force --sign - "$STAGE/Contents/MacOS/$APP_NAME"
 codesign --force --sign - "$STAGE"
 codesign --verify --deep "$STAGE"
 
-# Copy the signed bundle into place.
+# Copy the signed bundle into place. `build/` lives in an iCloud-synced folder, and the file provider
+# stamps FinderInfo / fpfs xattrs onto new files — asynchronous, so it can land after the copy and even
+# after signing, which breaks the seal ("resource fork, Finder information, or similar detritus").
+# Copy without any extended attributes, then strip, re-sign and verify, retrying a couple of times
+# because the file provider may still add one in the moment after we look.
 mkdir -p build
 rm -rf "$APP"
-cp -R "$STAGE" "$APP"
-
-# `build/` lives in an iCloud-synced folder, and Finder / the file provider stamp FinderInfo and
-# fpfs xattrs onto the copy — enough for `codesign --verify` to reject the app ("resource fork,
-# Finder information, or similar detritus"). Strip and re-sign in place so the bundle on disk is
-# valid, not just the staged one.
-xattr -cr "$APP" 2>/dev/null || true
-find "$APP" -exec xattr -d com.apple.provenance {} \; 2>/dev/null || true
-find "$APP" -name '._*' -delete 2>/dev/null || true
-codesign --force --sign - "$APP/Contents/MacOS/$APP_NAME"
-codesign --force --sign - "$APP"
-codesign --verify --deep --strict "$APP"
+ditto --norsrc --noextattr "$STAGE" "$APP"
+for attempt in 1 2 3; do
+  xattr -cr "$APP" 2>/dev/null || true
+  find "$APP" -exec xattr -d com.apple.provenance {} \; 2>/dev/null || true
+  find "$APP" -name '._*' -delete 2>/dev/null || true
+  codesign --force --sign - "$APP/Contents/MacOS/$APP_NAME" >/dev/null 2>&1
+  codesign --force --sign - "$APP" >/dev/null 2>&1
+  if codesign --verify --deep --strict "$APP" 2>/dev/null; then
+    break
+  fi
+  if [ "$attempt" = 3 ]; then
+    echo "FAIL: $APP still fails verification after 3 attempts (iCloud xattrs?)" >&2
+    codesign --verify --deep --strict "$APP"
+    exit 1
+  fi
+  sleep 0.3
+done
 
 echo "== done: $APP =="
 echo "Launch with: open \"$APP\""

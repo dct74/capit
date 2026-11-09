@@ -22,7 +22,7 @@ mkdir -p "$OUT_DIR"
 
 echo "== stage, strip, sign =="
 STAGE="$(mktemp -d)/Capit.app"
-ditto "$APP" "$STAGE"
+ditto --norsrc --noextattr "$APP" "$STAGE"      # xattrs would make codesign reject the bundle
 xattr -cr "$STAGE" 2>/dev/null || true
 find "$STAGE" -name '._*' -delete 2>/dev/null || true
 find "$STAGE" -exec xattr -d com.apple.provenance {} \; 2>/dev/null || true
