@@ -328,13 +328,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// A target cell lights up if *any* source pixel under it has an edge, so the thin lines survive
     /// the reduction to menu bar size.
     private static func bladeSeams(of image: CGImage, resolution: Int) -> [(Int, Int)] {
+        let source = image
         let w = image.width, h = image.height
         var px = [UInt8](repeating: 0, count: w * h * 4)
         px.withUnsafeMutableBytes { raw in
             guard let ctx = CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8,
                                       bytesPerRow: w * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
-            ctx.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h)))
+            ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
+            ctx.draw(source, in: CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h)))
         }
         var minX = w, minY = h, maxX = -1, maxY = -1
         for y in 0..<h {

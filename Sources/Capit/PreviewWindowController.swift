@@ -145,10 +145,12 @@ final class PreviewPresenter {
 /// Draws the rounded, softly-shadowed thumbnail and forwards mouse events.
 private final class PreviewView: NSView {
     weak var controller: PreviewWindowController?
-    private let image: CGImage
+    /// Wrapped once: `NSImage(cgImage:size:)` in `draw` allocated a fresh wrapper on every pass.
+    private let image: NSImage
 
     init(image: CGImage) {
-        self.image = image
+        self.image = NSImage(cgImage: image,
+                             size: NSSize(width: CGFloat(image.width), height: CGFloat(image.height)))
         super.init(frame: .zero)
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -157,8 +159,7 @@ private final class PreviewView: NSView {
         super.draw(dirtyRect)
         let rect = bounds
 
-        let img = NSImage(cgImage: image, size: NSSize(width: CGFloat(image.width),
-                                                       height: CGFloat(image.height)))
+        let img = image
         let iw = img.size.width, ih = img.size.height
         guard iw > 0, ih > 0 else { return }
         let scale = min(rect.width / iw, rect.height / ih)
