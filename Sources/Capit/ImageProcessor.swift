@@ -5,7 +5,10 @@ import CoreGraphics
 enum ImageProcessor {
 
     /// Visual calibration knobs.
-    static let cornerRadiusRatio: CGFloat = 0.038    // region/window screenshots
+    /// Region/window screenshots. With exponent 5 this is visually the same corner as the exponent-3
+    /// 0.042 it replaced (45-degree inset 5.66 px on a 450 px-short-side image, measured both ways);
+    /// the tighter 0.038 that shipped in 1.5.2-1.5.5 read as "smaller corners than before".
+    static let cornerRadiusRatio: CGFloat = 0.066
     static let cornerExponent: CGFloat = 5.0          // ~Apple continuous curve feel
     static let minCornerRadiusPx: CGFloat = 14
 

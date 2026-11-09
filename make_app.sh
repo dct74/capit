@@ -71,5 +71,16 @@ mkdir -p build
 rm -rf "$APP"
 cp -R "$STAGE" "$APP"
 
+# `build/` lives in an iCloud-synced folder, and Finder / the file provider stamp FinderInfo and
+# fpfs xattrs onto the copy — enough for `codesign --verify` to reject the app ("resource fork,
+# Finder information, or similar detritus"). Strip and re-sign in place so the bundle on disk is
+# valid, not just the staged one.
+xattr -cr "$APP" 2>/dev/null || true
+find "$APP" -exec xattr -d com.apple.provenance {} \; 2>/dev/null || true
+find "$APP" -name '._*' -delete 2>/dev/null || true
+codesign --force --sign - "$APP/Contents/MacOS/$APP_NAME"
+codesign --force --sign - "$APP"
+codesign --verify --deep --strict "$APP"
+
 echo "== done: $APP =="
 echo "Launch with: open \"$APP\""

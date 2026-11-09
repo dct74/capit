@@ -142,7 +142,7 @@ final class CaptureController {
             guard let target else { return }
             await presentPending(image, screen: target,
                                  finalURL: CapturePipeline.desktopURL(),
-                                 needsFinishing: true, radiusRatio: 0.027)
+                                 needsFinishing: true, radiusRatio: 0.049)
         } catch {
             presentError(error)
         }
