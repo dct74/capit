@@ -366,9 +366,8 @@ final class InteractiveCaptureController: NSObject {
     }
 
     private static func displayBounds(_ screen: NSScreen) -> CGRect {
-        let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
-        if let id {
-            return CGDisplayBounds(CGDirectDisplayID(id.uint32Value))
+        if let id = screen.displayID {
+            return CGDisplayBounds(id)
         }
         return screen.frame
     }

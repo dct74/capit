@@ -140,9 +140,9 @@ final class CaptureController {
             playSystemScreenshotSound()
             let target = activeScreen() ?? NSScreen.main
             guard let target else { return }
-            presentPending(image, screen: target,
-                           finalURL: CapturePipeline.desktopURL(),
-                           needsFinishing: true, radiusRatio: 0.027)
+            await presentPending(image, screen: target,
+                                 finalURL: CapturePipeline.desktopURL(),
+                                 needsFinishing: true, radiusRatio: 0.027)
         } catch {
             presentError(error)
         }
@@ -174,8 +174,8 @@ final class CaptureController {
             let decorated = await Task.detached(priority: .userInitiated) {
                 ImageProcessor.alreadyRoundedOrShadowed(image)
             }.value
-            presentPending(image, screen: screen, finalURL: CapturePipeline.desktopURL(),
-                           needsFinishing: !decorated)
+            await presentPending(image, screen: screen, finalURL: CapturePipeline.desktopURL(),
+                                 needsFinishing: !decorated)
         } catch {
             if case CaptureError.cancelled = error { return }
             presentError(error)
@@ -268,8 +268,7 @@ final class CaptureController {
     }
 
     private func pickDisplay(screen: NSScreen?, content: SCShareableContent) -> SCDisplay? {
-        let id = screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
-        let target = id?.uint32Value ?? 0
+        let target = screen?.displayID ?? 0
         return content.displays.first(where: { $0.displayID == target }) ?? content.displays.first
     }
 
@@ -282,7 +281,7 @@ final class CaptureController {
 
     private func presentPending(_ image: CGImage, screen: NSScreen, finalURL: URL,
                                needsFinishing: Bool = true,
-                               radiusRatio: CGFloat = ImageProcessor.cornerRadiusRatio) {
+                               radiusRatio: CGFloat = ImageProcessor.cornerRadiusRatio) async {
         // The product — corners and shadow applied — is made once, now, and serves both the
         // clipboard and the file. That keeps the clipboard correct the moment the screenshot is
         // taken instead of several seconds later when the preview expires, and it means landing the
@@ -293,7 +292,11 @@ final class CaptureController {
         // encoding a full-size PNG on the main thread just before showing the preview.
         let productURL = pendingTempURL()
         let pending = PendingCapture()
-        let thumb = ImageProcessor.thumbnail(from: image) ?? image
+        // Downscaling a 5K capture is tens of milliseconds of sampling; it must not hold up the main
+        // thread at the exact moment the screenshot lands.
+        let thumb = await Task.detached(priority: .userInitiated) {
+            ImageProcessor.thumbnail(from: image)
+        }.value ?? image
 
         /// Puts the capture on the desktop: waits for the decorating write rather than racing it,
         /// decorates the raw capture itself only if that write produced nothing, then moves the
@@ -381,27 +384,17 @@ final class CaptureController {
 
     private func presentError(_ error: Error) {
         if case CaptureError.cancelled = error { return }
-        let alert = NSAlert()
-        alert.messageText = "Capit"
-        alert.informativeText = error.localizedDescription
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "好")
-        NSApp.activate(ignoringOtherApps: true)
-        alert.runModal()
+        presentAlert("Capit", error.localizedDescription)
     }
 
     private func presentPermissionGuidance() {
-        let alert = NSAlert()
-        alert.messageText = "需要屏幕录制权限"
-        alert.informativeText = "Capit 需要「屏幕录制」权限才能截图。\n\n"
-            + "请前往：系统设置 → 隐私与安全性 → 屏幕录制，勾选 Capit。\n"
-            + "如果列表中没有 Capit，点击右下角 + 手动添加。\n\n"
-            + "开启后请完全退出并重新打开 Capit 才会生效。"
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "打开系统设置")
-        alert.addButton(withTitle: "好")
-        NSApp.activate(ignoringOtherApps: true)
-        if alert.runModal() == .alertFirstButtonReturn {
+        let response = presentAlert("需要屏幕录制权限",
+                     "Capit 需要「屏幕录制」权限才能截图。\n\n"
+                     + "请前往：系统设置 → 隐私与安全性 → 屏幕录制，勾选 Capit。\n"
+                     + "如果列表中没有 Capit，点击右下角 + 手动添加。\n\n"
+                     + "开启后请完全退出并重新打开 Capit 才会生效。",
+                     buttons: ["打开系统设置", "好"])
+        if response == .alertFirstButtonReturn {
             if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
                 NSWorkspace.shared.open(url)
             }

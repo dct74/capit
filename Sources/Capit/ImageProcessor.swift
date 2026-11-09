@@ -9,6 +9,13 @@ enum ImageProcessor {
     static let cornerExponent: CGFloat = 5.0          // ~Apple continuous curve feel
     static let minCornerRadiusPx: CGFloat = 14
 
+    /// "Is this already a finished card?" probe. One rule, four numbers: the downscale it runs at,
+    /// what counts as opaque, and how much of the frame real content must cover.
+    static let probeMaxSide = 256
+    static let probeOpaqueAlpha = 40
+    static let probeMinCoverWidth: CGFloat = 0.70
+    static let probeMinCoverHeight: CGFloat = 0.50
+
     /// Continuous-corner (squircle) rounding, in the image's own orientation.
     static func applyingRoundedCorners(to image: CGImage,
                                        radiusRatio: CGFloat = cornerRadiusRatio) -> CGImage? {
@@ -40,8 +47,7 @@ enum ImageProcessor {
         let ai = image.alphaInfo
         guard ai != .none, ai != .noneSkipLast, ai != .noneSkipFirst else { return false }
 
-        let maxSide = 256
-        let scale = min(1.0, CGFloat(maxSide) / CGFloat(max(image.width, image.height)))
+        let scale = min(1.0, CGFloat(probeMaxSide) / CGFloat(max(image.width, image.height)))
         let w = max(8, Int(CGFloat(image.width) * scale))
         let h = max(8, Int(CGFloat(image.height) * scale))
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
@@ -56,7 +62,7 @@ enum ImageProcessor {
         func a(_ x: Int, _ y: Int) -> Int { Int(p[(y * w + x) * 4 + 3]) }
 
         // Image corners must be transparent.
-        let opaque = 40
+        let opaque = probeOpaqueAlpha
         guard a(0, 0) < opaque, a(w - 1, 0) < opaque, a(0, h - 1) < opaque, a(w - 1, h - 1) < opaque else { return false }
         // ...and there must be actual content in the middle.
         guard a(w / 2, h / 2) >= opaque else { return false }
@@ -71,7 +77,7 @@ enum ImageProcessor {
 
         let coverW = CGFloat(bx1 - bx0 + 1) / CGFloat(w)
         let coverH = CGFloat(by1 - by0 + 1) / CGFloat(h)
-        guard coverW >= 0.70, coverH >= 0.50 else { return false }
+        guard coverW >= probeMinCoverWidth, coverH >= probeMinCoverHeight else { return false }
 
         // The content's own corners must be transparent → it is a rounded rectangle
         // (not, say, a square image with a transparent border).
@@ -112,6 +118,24 @@ enum ImageProcessor {
         // ends up on the left — which is what "counter-clockwise" looks like.
         ctx.translateBy(x: CGFloat(h), y: 0)
         ctx.rotate(by: .pi / 2)
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return ctx.makeImage()
+    }
+
+    /// Rotates a picture 90° clockwise — the mirror of `rotatedLeft90`, used when the requested
+    /// orientation is closer in that direction (270° left is 90° right), which saves two full-size
+    /// copies per rotation.
+    static func rotatedRight90(_ image: CGImage) -> CGImage? {
+        let w = image.width, h = image.height
+        let cs = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let ctx = CGContext(data: nil, width: h, height: w, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: cs,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return nil
+        }
+        ctx.clear(CGRect(x: 0, y: 0, width: h, height: w))
+        ctx.translateBy(x: 0, y: CGFloat(w))
+        ctx.rotate(by: -.pi / 2)
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
         return ctx.makeImage()
     }

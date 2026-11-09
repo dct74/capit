@@ -23,9 +23,14 @@ final class PreviewWindowController: NSObject {
         super.init()
     }
 
+    /// The preview occupies this fraction of the screen, and fades on these durations.
+    private static let sizeFraction: CGFloat = 1.0 / 8
+    private static let fadeInDuration: TimeInterval = 0.15
+    private static let fadeOutDuration: TimeInterval = 0.35
+
     func show() {
         let sf = screen.frame
-        let size = NSSize(width: sf.width / 8, height: sf.height / 8)
+        let size = NSSize(width: sf.width * Self.sizeFraction, height: sf.height * Self.sizeFraction)
 
         let x = sf.maxX - size.width
         let y = sf.minY
@@ -50,7 +55,7 @@ final class PreviewWindowController: NSObject {
 
         p.orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.15
+            ctx.duration = Self.fadeInDuration
             p.animator().alphaValue = 1
         }
 
@@ -77,7 +82,7 @@ final class PreviewWindowController: NSObject {
         dismissTimer?.invalidate()
         dismissTimer = nil
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.35
+            ctx.duration = Self.fadeOutDuration
             self.panel?.animator().alphaValue = 0
         } completionHandler: {
             self.panel?.orderOut(nil)

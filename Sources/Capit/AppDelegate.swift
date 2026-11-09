@@ -487,15 +487,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showAbout() {
         let info = Bundle.main.infoDictionary
         let short = info?["CFBundleShortVersionString"] as? String
-        let alert = NSAlert()
-        alert.messageText = "关于 Capit"
         // No literal fallback: a hard-coded number goes stale silently, and reporting a wrong version
         // is worse than reporting none.
-        alert.informativeText = (short.map { "版本 v\($0)\n\n" } ?? "") + "菜单栏截图标注工具。"
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "好")
-        NSApp.activate(ignoringOtherApps: true)
-        alert.runModal()
+        presentAlert("关于 Capit",
+                     (short.map { "版本 v\($0)\n\n" } ?? "") + "菜单栏截图标注工具。",
+                     style: .informational)
     }
 
     @objc private func quit() {

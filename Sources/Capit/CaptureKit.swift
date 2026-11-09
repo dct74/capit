@@ -2,6 +2,14 @@ import Cocoa
 import CoreGraphics
 import ScreenCaptureKit
 
+extension NSScreen {
+    /// The CoreGraphics display id for this screen. Read from `deviceDescription` in three places
+    /// before; it is one rule, so it lives in one place.
+    var displayID: CGDirectDisplayID? {
+        (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+    }
+}
+
 enum CaptureError: Error, LocalizedError {
     case noScreenRecordingPermission
     case noShareableContent
@@ -79,7 +87,7 @@ enum CaptureKit {
     /// Points→pixels factor of the display being captured; 2.0 when it cannot be resolved.
     private static func backingScale(for displayID: CGDirectDisplayID) -> CGFloat {
         let screen = NSScreen.screens.first {
-            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID
+            $0.displayID == displayID
         }
         return screen?.backingScaleFactor ?? 2.0
     }

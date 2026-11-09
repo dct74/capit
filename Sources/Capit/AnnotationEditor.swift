@@ -413,6 +413,11 @@ private func drawTiled(_ image: CGImage, in bounds: CGRect, into cg: CGContext) 
 /// How far the rounded-rectangle corners slide from "constant stroke width" towards "equal inner
 /// and outer radius", 0...1. See the .rect case in renderShape; 0.25 halves the radius mismatch
 /// for only 10% thicker corners. Values above ~0.5 make the corners visibly fat.
+/// The document is expressed in points at half the picture's pixel size, so annotations are authored
+/// against a 2x-aware ruler. Named once: it used to be a bare `/ 2` in three places plus an
+/// `exportScale` that happened to divide out to the same number.
+private let annotationPixelsPerPoint: CGFloat = 2
+
 private let cornerBalance: CGFloat = 0.25
 
 /// The picture's own outline inside an already-decorated document, as an image mask taken from
@@ -999,6 +1004,7 @@ struct AnnotationShape {    /// Re-expresses the shape after its picture has tur
 }
 
 /// The annotation editor: toolbar (top) + scrollable canvas (bottom).
+@MainActor
 final class AnnotationEditorController: NSObject, NSWindowDelegate {
     private let window: NSWindow
     private let canvas: AnnotationCanvasView
@@ -1022,7 +1028,7 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
     private var didSave = false
     private var isSaving = false
     private var rawLandingQueued = false
-    private var exportScale: CGFloat { CGFloat(image.width) / docSize.width }
+    private var exportScale: CGFloat { annotationPixelsPerPoint }
     private var keyMonitor: Any?
     private var observers: [NSObjectProtocol] = []
     private weak var scrollView: NSScrollView?
@@ -1049,8 +1055,8 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
         self.isImported = isImported
         self.needsFinishing = needsFinishing
         self.radiusRatio = radiusRatio
-        let initialSize = CGSize(width: CGFloat(image.width) / 2,
-                                 height: CGFloat(image.height) / 2)
+        let initialSize = CGSize(width: CGFloat(image.width) / annotationPixelsPerPoint,
+                                 height: CGFloat(image.height) / annotationPixelsPerPoint)
 
         canvas = AnnotationCanvasView(image: image, docSize: initialSize)
         currentDocumentIsDecorated = !needsFinishing
@@ -1221,13 +1227,15 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
 
         let c = NotificationCenter.default
         let q = OperationQueue.main
+        // `addObserver`'s block is not main-actor isolated even when the queue is the main one, so the
+        // hop is made explicit rather than assumed.
         observers.append(c.addObserver(forName: NSWindow.didResizeNotification,
                                        object: window, queue: q) { [weak self] _ in
-            self?.relayoutImage()
+            Task { @MainActor in self?.relayoutImage() }
         })
         observers.append(c.addObserver(forName: NSWindow.didEndLiveResizeNotification,
                                        object: window, queue: q) { [weak self] _ in
-            self?.relayoutImage()
+            Task { @MainActor in self?.relayoutImage() }
         })
     }
 
@@ -1350,13 +1358,7 @@ final class AnnotationEditorController: NSObject, NSWindowDelegate {
     }
 
     private func presentSaveFailure(message: String) {
-        let a = NSAlert()
-        a.messageText = "保存失败"
-        a.informativeText = message
-        a.alertStyle = .warning
-        a.addButton(withTitle: "好")
-        NSApp.activate(ignoringOtherApps: true)
-        a.runModal()
+        presentAlert("保存失败", message)
     }
 
     /// Wraps a manually-managed bitmap buffer in a CGImage without copying. The provider owns
@@ -1448,12 +1450,16 @@ final class AnnotationCanvasView: NSView, NSTextFieldDelegate {
     /// Rebuilds the picture for `turns` quarter turns, without touching the shapes' coordinates.
     private func applyRotation(_ turns: Int) {
         rotationQuarterTurns = ((turns % 4) + 4) % 4
+        // Turn the short way: 270° left is 90° right, and each turn is a full-size copy.
+        let clockwise = rotationQuarterTurns > 2
+        let steps = clockwise ? 4 - rotationQuarterTurns : rotationQuarterTurns
         var img = originalImage
-        for _ in 0..<rotationQuarterTurns {
-            img = ImageProcessor.rotatedLeft90(img) ?? img
+        for _ in 0..<steps {
+            img = (clockwise ? ImageProcessor.rotatedRight90(img) : ImageProcessor.rotatedLeft90(img)) ?? img
         }
         currentImage = img
-        let pixelW = CGFloat(img.width) / 2, pixelH = CGFloat(img.height) / 2
+        let pixelW = CGFloat(img.width) / annotationPixelsPerPoint
+        let pixelH = CGFloat(img.height) / annotationPixelsPerPoint
         documentSize = CGSize(width: pixelW, height: pixelH)
         currentDocumentImage = img
         currentDocumentSize = documentSize
