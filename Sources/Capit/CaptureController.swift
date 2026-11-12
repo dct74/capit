@@ -192,22 +192,16 @@ final class CaptureController {
             proc.terminationHandler = { [weak self] p in
                 // The handler runs on a non-main thread; the property is main-actor isolated.
                 Task { @MainActor in self?.interactiveProcess = nil }
-                // A cancelled selection leaves no file and exits non-zero — that is the normal way
-                // out. Anything else that keeps us from reading the file is a real failure and must
-                // not be reported as "the user cancelled", which the caller swallows silently.
-                let size: Int
-                do {
-                    let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
-                    size = (attrs[.size] as? NSNumber)?.intValue ?? 0
-                } catch {
-                    cont.resume(throwing: p.terminationStatus == 0 ? error : CaptureError.cancelled)
-                    return
-                }
-                if p.terminationStatus == 0 && size > 0 {
+                // No output file at all means the user backed out (ESC, or a click outside the
+                // selection) — `screencapture` is not consistent about the exit status in that case,
+                // and surfacing the file-system error for it produced a spurious "cannot open file"
+                // alert. What is left is a real write failure: a file that exists but holds nothing,
+                // or one that is there when the process says it failed.
+                let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+                let size = (attrs?[.size] as? NSNumber)?.intValue ?? 0
+                if size > 0 && p.terminationStatus == 0 {
                     cont.resume()
                 } else if size > 0 {
-                    // It wrote something but failed: a full disk or an unwritable temp dir. Reporting
-                    // this as "cancelled" is what made the failure silent.
                     cont.resume(throwing: CaptureError.imageWriteFailed)
                 } else {
                     cont.resume(throwing: CaptureError.cancelled)
