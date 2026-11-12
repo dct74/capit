@@ -18,7 +18,10 @@ enum ImageProcessor {
     /// the tighter 0.038 that shipped in 1.5.2-1.5.5 read as "smaller corners than before".
     static let cornerRadiusRatio: CGFloat = 0.066
     static let cornerExponent: CGFloat = 5.0          // ~Apple continuous curve feel
-    static let minCornerRadiusPx: CGFloat = 14
+    /// Floor on the radius, in points: below it a small region capture has a corner so tight it reads as
+    /// a square edge. Converted to pixels like the ceiling, since a capture's rect is in pixels.
+    static let minCornerRadiusPt: CGFloat = 16
+    static var minCornerRadiusPx: CGFloat { minCornerRadiusPt * 2 }
 
     /// "Is this already a finished card?" probe. One rule, four numbers: the downscale it runs at,
     /// what counts as opaque, and how much of the frame real content must cover.

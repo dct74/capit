@@ -587,7 +587,7 @@ private var currentDocumentIsDecorated = false
 /// 6.6% — a drawn box is much smaller than a capture, and 6.6% of it is nearly a right angle.
 private func continuousRadius(for r: CGRect) -> CGFloat {
     // Same 28 pt ceiling as a capture's corner: beyond it the curve stops reading as a rounded box.
-    SquirclePath.radius(in: r, ratio: 0.2, minimum: 4, maximum: ImageProcessor.maxCornerRadiusPt)
+    SquirclePath.radius(in: r, ratio: 0.2, minimum: 12, maximum: ImageProcessor.maxCornerRadiusPt)
 }
 
 /// The box a text annotation occupies, used by the selection indicator, single-click hit testing and
