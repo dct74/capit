@@ -45,8 +45,8 @@ cat > "$STAGE/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key><string>Capit</string>
     <key>CFBundleDisplayName</key><string>Capit</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.5.6</string>
-    <key>CFBundleVersion</key><string>43</string>
+    <key>CFBundleShortVersionString</key><string>1.5.7</string>
+    <key>CFBundleVersion</key><string>44</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.graphics-design</string>
     <key>LSUIElement</key><true/>
