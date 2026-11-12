@@ -5,6 +5,14 @@ import CoreGraphics
 enum ImageProcessor {
 
     /// Visual calibration knobs.
+    /// Cap on the corner radius, in points. Apple's continuous corners sit around 28 pt, and past that
+    /// the curve starts eating the picture instead of framing it.
+    ///
+    /// A capture's rect is in *pixels* (2 per point, see `annotationPixelsPerPoint`), so the cap is
+    /// converted before it is compared with it.
+    static let maxCornerRadiusPt: CGFloat = 28
+    static var maxCornerRadiusPx: CGFloat { maxCornerRadiusPt * 2 }
+
     /// Region/window screenshots. With exponent 5 this is visually the same corner as the exponent-3
     /// 0.042 it replaced (45-degree inset 5.66 px on a 450 px-short-side image, measured both ways);
     /// the tighter 0.038 that shipped in 1.5.2-1.5.5 read as "smaller corners than before".
@@ -24,7 +32,8 @@ enum ImageProcessor {
                                        radiusRatio: CGFloat = cornerRadiusRatio) -> CGImage? {
         let w = image.width, h = image.height
         let rect = CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h))
-        let radius = SquirclePath.radius(in: rect, ratio: radiusRatio, minimum: minCornerRadiusPx)
+        let radius = SquirclePath.radius(in: rect, ratio: radiusRatio,
+                                         minimum: minCornerRadiusPx, maximum: Self.maxCornerRadiusPx)
         // CoreGraphics only, deliberately: this runs on a background task (the capture path) and
         // AppKit drawing is not safe there. Verified byte-identical to the NSImage/NSBitmapImageRep
         // version it replaced, anti-aliased corner edges included.

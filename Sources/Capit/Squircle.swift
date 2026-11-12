@@ -12,8 +12,9 @@ enum SquirclePath {
     /// Both the finished screenshot and the annotation shapes come through here. Their ratios and
     /// floors differ on purpose — a 5K capture and a 120 pt box are two orders of magnitude apart, and
     /// one ratio cannot serve both — but the rule itself exists once.
-    static func radius(in rect: CGRect, ratio: CGFloat, minimum: CGFloat) -> CGFloat {
-        max(minimum, min(rect.width, rect.height) * ratio)
+    static func radius(in rect: CGRect, ratio: CGFloat, minimum: CGFloat,
+                       maximum: CGFloat = .greatestFiniteMagnitude) -> CGFloat {
+        min(maximum, max(minimum, min(rect.width, rect.height) * ratio))
     }
 
     /// Points sampled per corner. The two variants used to take it only to forward it to each other,
